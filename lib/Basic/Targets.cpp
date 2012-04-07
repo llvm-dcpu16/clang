@@ -3385,9 +3385,7 @@ namespace {
    }
     virtual void getTargetDefines(const LangOptions &Opts,
                                   MacroBuilder &Builder) const {
-      Builder.defineMacro("DCPU16");
       Builder.defineMacro("__DCPU16__");
-      // FIXME: defines for different 'flavours' of MCU
     }
     virtual void getTargetBuiltins(const Builtin::Info *&Records,
                                    unsigned &NumRecords) const {
@@ -3396,7 +3394,7 @@ namespace {
       NumRecords = 0;
     }
     virtual bool hasFeature(StringRef Feature) const {
-      return Feature == "msp430";
+      return Feature == "dcpu16";
     }
     virtual void getGCCRegNames(const char * const *&Names,
                                 unsigned &NumNames) const;
