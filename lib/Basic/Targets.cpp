@@ -3363,6 +3363,76 @@ namespace {
 }
 
 namespace {
+  class DCPU16TargetInfo : public TargetInfo {
+    static const char * const GCCRegNames[];
+  public:
+    DCPU16TargetInfo(const std::string& triple) : TargetInfo(triple) {
+      BigEndian = false;
+      TLSSupported = false;
+      IntWidth = 16; IntAlign = 16;
+      LongWidth = 32; LongLongWidth = 64;
+      LongAlign = LongLongAlign = 16;
+      PointerWidth = 16; PointerAlign = 16;
+      SuitableAlign = 16;
+      SizeType = UnsignedInt;
+      IntMaxType = SignedLongLong;
+      UIntMaxType = UnsignedLongLong;
+      Int64Type = SignedLongLong;
+      IntPtrType = SignedShort;
+      PtrDiffType = SignedInt;
+      SigAtomicType = SignedLong;
+      DescriptionString = "e-p:16:16:16-i8:8:8-i16:16:16-i32:16:32-i64:64:64-n8:16";
+   }
+    virtual void getTargetDefines(const LangOptions &Opts,
+                                  MacroBuilder &Builder) const {
+      Builder.defineMacro("DCPU16");
+      Builder.defineMacro("__DCPU16__");
+      // FIXME: defines for different 'flavours' of MCU
+    }
+    virtual void getTargetBuiltins(const Builtin::Info *&Records,
+                                   unsigned &NumRecords) const {
+     // FIXME: Implement.
+      Records = 0;
+      NumRecords = 0;
+    }
+    virtual bool hasFeature(StringRef Feature) const {
+      return Feature == "msp430";
+    }
+    virtual void getGCCRegNames(const char * const *&Names,
+                                unsigned &NumNames) const;
+    virtual void getGCCRegAliases(const GCCRegAlias *&Aliases,
+                                  unsigned &NumAliases) const {
+      // No aliases.
+      Aliases = 0;
+      NumAliases = 0;
+    }
+    virtual bool validateAsmConstraint(const char *&Name,
+                                       TargetInfo::ConstraintInfo &info) const {
+      // No target constraints for now.
+      return false;
+    }
+    virtual const char *getClobbers() const {
+      // FIXME: Is this really right?
+      return "";
+    }
+    virtual const char *getVAListDeclaration() const {
+      // FIXME: implement
+      return "typedef char* __builtin_va_list;";
+   }
+  };
+
+  const char * const DCPU16TargetInfo::GCCRegNames[] = {
+    "A", "B", "C", "X", "Y", "Z", "I", "J", "O", "SP", "PC"
+  };
+
+  void DCPU16TargetInfo::getGCCRegNames(const char * const *&Names,
+                                        unsigned &NumNames) const {
+    Names = GCCRegNames;
+    NumNames = llvm::array_lengthof(GCCRegNames);
+  }
+}
+
+namespace {
 
   // LLVM and Clang cannot be used directly to output native binaries for
   // target, but is used to compile C code to llvm bitcode with correct
@@ -3928,6 +3998,9 @@ static TargetInfo *AllocateTarget(const std::string &T) {
 
   case llvm::Triple::msp430:
     return new MSP430TargetInfo(T);
+
+  case llvm::Triple::dcpu16:
+    return new DCPU16TargetInfo(T);
 
   case llvm::Triple::mips:
     switch (os) {
