@@ -787,38 +787,46 @@ static const char* getMipsABIFromArch(StringRef ArchName) {
     return "n64";
 }
 
-void Clang::AddMIPSTargetArgs(const ArgList &Args,
-                             ArgStringList &CmdArgs) const {
-  const Driver &D = getToolChain().getDriver();
-
+// Get CPU and ABI names. They are not independent
+// so we have to calculate them together.
+static void getMipsCPUAndABI(const ArgList &Args,
+                             const ToolChain &TC,
+                             StringRef &CPUName,
+                             StringRef &ABIName) {
   StringRef ArchName;
-  const char *CPUName;
 
-  // Set target cpu and architecture.
+  // Select target cpu and architecture.
   if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ)) {
     CPUName = A->getValue(Args);
     ArchName = getMipsArchFromCPU(CPUName);
   }
   else {
-    ArchName = Args.MakeArgString(getToolChain().getArchName());
+    ArchName = Args.MakeArgString(TC.getArchName());
     if (!checkMipsArchName(ArchName))
-      D.Diag(diag::err_drv_invalid_arch_name) << ArchName;
+      TC.getDriver().Diag(diag::err_drv_invalid_arch_name) << ArchName;
     else
       CPUName = getMipsCPUFromArch(ArchName);
   }
-
-  CmdArgs.push_back("-target-cpu");
-  CmdArgs.push_back(CPUName);
  
   // Select the ABI to use.
-  const char *ABIName = 0;
   if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
     ABIName = A->getValue(Args);
   else 
     ABIName = getMipsABIFromArch(ArchName);
+}
+
+void Clang::AddMIPSTargetArgs(const ArgList &Args,
+                             ArgStringList &CmdArgs) const {
+  const Driver &D = getToolChain().getDriver();
+  StringRef CPUName;
+  StringRef ABIName;
+  getMipsCPUAndABI(Args, getToolChain(), CPUName, ABIName);
+
+  CmdArgs.push_back("-target-cpu");
+  CmdArgs.push_back(CPUName.data());
 
   CmdArgs.push_back("-target-abi");
-  CmdArgs.push_back(ABIName);
+  CmdArgs.push_back(ABIName.data());
 
   // Select the float ABI as determined by -msoft-float, -mhard-float,
   // and -mfloat-abi=.
@@ -1472,19 +1480,43 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // would do to enable flag_pic.
   //
   // FIXME: Centralize this code.
-  bool PICEnabled = (Args.hasArg(options::OPT_fPIC) ||
-                     Args.hasArg(options::OPT_fpic) ||
-                     Args.hasArg(options::OPT_fPIE) ||
-                     Args.hasArg(options::OPT_fpie));
-  bool PICDisabled = (Args.hasArg(options::OPT_mkernel) ||
-                      Args.hasArg(options::OPT_static) ||
-                      Args.hasArg(options::OPT_fno_PIC) ||
-                      Args.hasArg(options::OPT_fno_pic) ||
-                      Args.hasArg(options::OPT_fno_PIE) ||
-                      Args.hasArg(options::OPT_fno_pie));
+  Arg *LastPICArg = 0;
+  for (ArgList::const_iterator I = Args.begin(), E = Args.end(); I != E; ++I) {
+    if ((*I)->getOption().matches(options::OPT_fPIC) ||
+        (*I)->getOption().matches(options::OPT_fno_PIC) ||
+        (*I)->getOption().matches(options::OPT_fpic) ||
+        (*I)->getOption().matches(options::OPT_fno_pic) ||
+        (*I)->getOption().matches(options::OPT_fPIE) ||
+        (*I)->getOption().matches(options::OPT_fno_PIE) ||
+        (*I)->getOption().matches(options::OPT_fpie) ||
+        (*I)->getOption().matches(options::OPT_fno_pie)) {
+      LastPICArg = *I;
+      (*I)->claim();
+    }
+  }
+  bool PICDisabled = false;
+  bool PICEnabled = false;
+  bool PICForPIE = false;
+  if (LastPICArg) {
+    PICForPIE = (LastPICArg->getOption().matches(options::OPT_fPIE) ||
+                 LastPICArg->getOption().matches(options::OPT_fpie));
+    PICEnabled = (PICForPIE ||
+                  LastPICArg->getOption().matches(options::OPT_fPIC) ||
+                  LastPICArg->getOption().matches(options::OPT_fpic));
+    PICDisabled = !PICEnabled;
+  }
+  // Note that these flags are trump-cards. Regardless of the order w.r.t. the
+  // PIC or PIE options above, if these show up, PIC is disabled.
+  if (Args.hasArg(options::OPT_mkernel))
+    PICDisabled = true;
+  if (Args.hasArg(options::OPT_static))
+    PICDisabled = true;
+  bool DynamicNoPIC = Args.hasArg(options::OPT_mdynamic_no_pic);
+
+  // Select the relocation model.
   const char *Model = getToolChain().GetForcedPicModel();
   if (!Model) {
-    if (Args.hasArg(options::OPT_mdynamic_no_pic))
+    if (DynamicNoPIC)
       Model = "dynamic-no-pic";
     else if (PICDisabled)
       Model = "static";
@@ -1493,19 +1525,25 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     else
       Model = getToolChain().GetDefaultRelocationModel();
   }
-  if (StringRef(Model) != "pic") {
+  StringRef ModelStr = Model ? Model : "";
+  if (Model && ModelStr != "pic") {
     CmdArgs.push_back("-mrelocation-model");
     CmdArgs.push_back(Model);
   }
 
-  // Infer the __PIC__ value.
-  //
-  // FIXME:  This isn't quite right on Darwin, which always sets
-  // __PIC__=2.
-  if (strcmp(Model, "pic") == 0 || strcmp(Model, "dynamic-no-pic") == 0) {
+  // Infer the __PIC__ and __PIE__ values.
+  if (ModelStr == "pic" && PICForPIE) {
+    CmdArgs.push_back("-pie-level");
+    CmdArgs.push_back((LastPICArg &&
+                       LastPICArg->getOption().matches(options::OPT_fPIE)) ?
+                      "2" : "1");
+  } else if (ModelStr == "pic" || ModelStr == "dynamic-no-pic") {
     CmdArgs.push_back("-pic-level");
-    CmdArgs.push_back(Args.hasArg(options::OPT_fPIC) ? "2" : "1");
+    CmdArgs.push_back(((ModelStr != "dynamic-no-pic" && LastPICArg &&
+                        LastPICArg->getOption().matches(options::OPT_fPIC)) ||
+                       getToolChain().getTriple().isOSDarwin()) ? "2" : "1");
   }
+
   if (!Args.hasFlag(options::OPT_fmerge_all_constants,
                     options::OPT_fno_merge_all_constants))
     CmdArgs.push_back("-fno-merge-all-constants");
@@ -5021,17 +5059,21 @@ void linuxtools::Assemble::ConstructJob(Compilation &C, const JobAction &JA,
              getToolChain().getArch() == llvm::Triple::mipsel ||
              getToolChain().getArch() == llvm::Triple::mips64 ||
              getToolChain().getArch() == llvm::Triple::mips64el) {
-    // Get Mips CPU name and pass it to 'as'.
-    const char *CPUName;
-    if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
-      CPUName = A->getValue(Args);
-    else
-      CPUName = getMipsCPUFromArch(getToolChain().getArchName());
+    StringRef CPUName;
+    StringRef ABIName;
+    getMipsCPUAndABI(Args, getToolChain(), CPUName, ABIName);
 
-    if (CPUName) {
-      CmdArgs.push_back("-march");
-      CmdArgs.push_back(CPUName);
-    }
+    CmdArgs.push_back("-march");
+    CmdArgs.push_back(CPUName.data());
+
+    // Convert ABI name to the GNU tools acceptable variant.
+    if (ABIName == "o32")
+      ABIName = "32";
+    else if (ABIName == "n64")
+      ABIName = "64";
+
+    CmdArgs.push_back("-mabi");
+    CmdArgs.push_back(ABIName.data());
 
     if (getToolChain().getArch() == llvm::Triple::mips ||
         getToolChain().getArch() == llvm::Triple::mips64)
