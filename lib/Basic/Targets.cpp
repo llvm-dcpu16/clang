@@ -3369,6 +3369,8 @@ namespace {
     DCPU16TargetInfo(const std::string& triple) : TargetInfo(triple) {
       BigEndian = false;
       TLSSupported = false;
+      CharWidth = CharAlign = 16;
+      ShortWidth = ShortAlign = 16;
       BoolWidth = BoolAlign = 16;
       IntWidth = 16; IntAlign = 16;
       LongWidth = 32; LongLongWidth = 64;
