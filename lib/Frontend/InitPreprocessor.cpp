@@ -431,8 +431,13 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   // Initialize target-specific preprocessor defines.
 
   // Define type sizing macros based on the target properties.
-  assert(TI.getCharWidth() == 8 && "Only support 8-bit char so far");
-  Builder.defineMacro("__CHAR_BIT__", "8");
+  if (TI.getCharWidth() == 8) {
+	  Builder.defineMacro("__CHAR_BIT__", "8");
+  } else if(TI.getCharWidth() == 16) {
+	  Builder.defineMacro("__CHAR_BIT__", "16");
+  } else {
+	  assert("Only support 8-bit and 16-bit char so far");
+  }
 
   DefineTypeSize("__SCHAR_MAX__", TI.getCharWidth(), "", true, Builder);
   DefineTypeSize("__SHRT_MAX__", TargetInfo::SignedShort, TI, Builder);
