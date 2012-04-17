@@ -68,6 +68,8 @@ protected:
   bool TLSSupported;
   bool NoAsmVariants;  // True if {|} are normal characters.
   unsigned char PointerWidth, PointerAlign;
+  unsigned char CharWidth, CharAlign;
+  unsigned char ShortWidth, ShortAlign;
   unsigned char BoolWidth, BoolAlign;
   unsigned char IntWidth, IntAlign;
   unsigned char HalfWidth, HalfAlign;
@@ -191,13 +193,13 @@ public:
   unsigned getBoolWidth() const { return BoolWidth; }
   unsigned getBoolAlign() const { return BoolAlign; }
 
-  unsigned getCharWidth() const { return 8; } // FIXME
-  unsigned getCharAlign() const { return 8; } // FIXME
+  unsigned getCharWidth() const { return CharWidth; }
+  unsigned getCharAlign() const { return CharAlign; }
 
   /// getShortWidth/Align - Return the size of 'signed short' and
   /// 'unsigned short' for this target, in bits.
-  unsigned getShortWidth() const { return 16; } // FIXME
-  unsigned getShortAlign() const { return 16; } // FIXME
+  unsigned getShortWidth() const { return ShortWidth; }
+  unsigned getShortAlign() const { return ShortAlign; }
 
   /// getIntWidth/Align - Return the size of 'signed int' and 'unsigned int' for
   /// this target, in bits.
