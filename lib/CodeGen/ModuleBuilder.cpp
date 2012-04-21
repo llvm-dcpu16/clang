@@ -54,7 +54,9 @@ namespace {
 
       M->setTargetTriple(Ctx->getTargetInfo().getTriple().getTriple());
       M->setDataLayout(Ctx->getTargetInfo().getTargetDescription());
-      TD.reset(new llvm::TargetData(Ctx->getTargetInfo().getTargetDescription()));
+      M->setBitsPerByte(Ctx->getTargetInfo().getBitsPerByte());
+      TD.reset(new llvm::TargetData(Ctx->getTargetInfo().getTargetDescription(),
+                                    Ctx->getTargetInfo().getBitsPerByte()));
       Builder.reset(new CodeGen::CodeGenModule(Context, CodeGenOpts,
                                                *M, *TD, Diags));
     }

@@ -82,6 +82,7 @@ protected:
   unsigned char SuitableAlign;
   unsigned char MaxAtomicPromoteWidth, MaxAtomicInlineWidth;
   const char *DescriptionString;
+  unsigned BitsPerByte;
   const char *UserLabelPrefix;
   const char *MCountName;
   const llvm::fltSemantics *HalfFormat, *FloatFormat, *DoubleFormat,
@@ -469,6 +470,10 @@ public:
 
   const char *getTargetDescription() const {
     return DescriptionString;
+  }
+
+  unsigned getBitsPerByte() const {
+    return BitsPerByte;
   }
 
   struct GCCRegAlias {

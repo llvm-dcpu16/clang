@@ -3384,8 +3384,9 @@ namespace {
       IntPtrType = SignedShort;
       PtrDiffType = SignedInt;
       SigAtomicType = SignedLong;
-      DescriptionString = "e-p:16:8:8-i8:8:8-i16:8:8-i32:8:8-s0:8:8-n16";
-   }
+      DescriptionString = "e-p:16:16:16-i8:16:16-i16:16:16-i32:16:16-s0:16:16-n16";
+      BitsPerByte = 16;
+    }
     virtual void getTargetDefines(const LangOptions &Opts,
                                   MacroBuilder &Builder) const {
       Builder.defineMacro("__DCPU16__");
