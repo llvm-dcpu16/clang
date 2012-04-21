@@ -18,7 +18,7 @@ extern "C" {
 
   // Check types
 
-  // CHECK: signext i8 @check_char()
+  // CHECK: signext i16 @check_char()
   char check_char() { return 0; }
 
   // CHECK: signext i16 @check_short()
@@ -33,7 +33,7 @@ extern "C" {
   // CHECK: i64 @check_longlong()
   long long check_longlong() { return 0; }
 
-  // CHECK: zeroext i8 @check_uchar()
+  // CHECK: zeroext i16 @check_uchar()
   unsigned char check_uchar() { return 0; }
 
   // CHECK: zeroext i16 @check_ushort()
@@ -65,10 +65,22 @@ template<int> void Switch();
 template<> void Switch<4>();
 template<> void Switch<8>();
 
-void check_pointer_size() {
-  // CHECK: SwitchILi2
+void check_sizeof() {
+  // CHECK: SwitchILi1
   Switch<sizeof(void*)>();
 
-  // CHECK: SwitchILi8
+  // CHECK: SwitchILi1
+  Switch<sizeof(char)>();
+
+  // CHECK: SwitchILi1
+  Switch<sizeof(short)>();
+
+  // CHECK: SwitchILi1
+  Switch<sizeof(int)>();
+
+  // CHECK: SwitchILi2
+  Switch<sizeof(long)>();
+
+  // CHECK: SwitchILi4
   Switch<sizeof(long long)>();
 }
