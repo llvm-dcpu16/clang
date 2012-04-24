@@ -1386,9 +1386,10 @@ public:
   static StringLiteral *CreateEmpty(ASTContext &C, unsigned NumStrs);
 
   StringRef getString() const {
-    assert(CharByteWidth==1
-           && "This function is used in places that assume strings use char");
-    return StringRef(StrData.asChar, getByteLength());
+    if (CharByteWidth==1)
+    	return StringRef(StrData.asChar, getByteLength());
+    else
+    	return StringRef(StrData.asChar, getByteLength()).removeZero();
   }
 
   /// Allow clients that need the byte representation, such as ASTWriterStmt
