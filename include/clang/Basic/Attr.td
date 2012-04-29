@@ -256,6 +256,11 @@ def OpenCLKernel : Attr {
   let Spellings = ["opencl_kernel_function"];
 }
 
+def DCPU16Interrupt : InheritableAttr {
+  let Spellings = ["dcpu16_intr"];
+  let SemaHandler = 0;
+}
+
 def Deprecated : InheritableAttr {
   let Spellings = ["deprecated"];
   let Args = [StringArgument<"Message">];

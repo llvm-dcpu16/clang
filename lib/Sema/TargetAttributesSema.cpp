@@ -71,6 +71,32 @@ namespace {
   };
 }
 
+static void HandleDCPU16InterruptAttr(Decl *d,
+                                      const AttributeList &Attr, Sema &S) {
+    // Check the attribute arguments.
+    if (Attr.getNumArgs() != 0) {
+      S.Diag(Attr.getLoc(), diag::err_attribute_wrong_number_arguments) << 0;
+      return;
+    }
+
+    // FIXME: Check for decl - it should be void ()(unsigned).
+
+    d->addAttr(::new (S.Context) DCPU16InterruptAttr(Attr.getLoc(), S.Context));
+    d->addAttr(::new (S.Context) UsedAttr(Attr.getLoc(), S.Context));
+  }
+
+namespace {
+  class DCPU16AttributesSema : public TargetAttributesSema {
+  public:
+    DCPU16AttributesSema() { }
+    bool ProcessDeclAttribute(Scope *scope, Decl *D,
+                              const AttributeList &Attr, Sema &S) const {
+      HandleDCPU16InterruptAttr(D, Attr, S);
+      return true;
+    }
+  };
+}
+
 static void HandleMBlazeInterruptHandlerAttr(Decl *d, const AttributeList &Attr,
                                              Sema &S) {
   // Check the attribute arguments.
@@ -267,6 +293,8 @@ const TargetAttributesSema &Sema::getTargetAttributesSema() const {
   switch (Triple.getArch()) {
   case llvm::Triple::msp430:
     return *(TheTargetAttributesSema = new MSP430AttributesSema);
+  case llvm::Triple::dcpu16:
+    return *(TheTargetAttributesSema = new DCPU16AttributesSema);
   case llvm::Triple::mblaze:
     return *(TheTargetAttributesSema = new MBlazeAttributesSema);
   case llvm::Triple::x86:
