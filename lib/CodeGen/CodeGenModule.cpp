@@ -2277,8 +2277,16 @@ static llvm::GlobalVariable *GenerateStringLiteral(StringRef str,
                                              const char *GlobalName,
                                              unsigned Alignment) {
   // Create Constant for this string literal. Don't add a '\0'.
-  llvm::Constant *C =
-      llvm::ConstantDataArray::getString(CGM.getLLVMContext(), str, false);
+  llvm::Constant *C;
+  if (CGM.getContext().getCharWidth() == 8) {
+    C = llvm::ConstantDataArray::getString(CGM.getLLVMContext(), str, false);
+  } else if (CGM.getContext().getCharWidth() == 16) {
+    SmallVector<uint16_t, 64> ElementVals;
+    ElementVals.append(str.begin(), str.end());
+    C = llvm::ConstantDataArray::get(CGM.getLLVMContext(), ElementVals);
+  } else {
+    assert(0 && "unsupported char width");
+  }
 
   // Create a global variable for this string
   llvm::GlobalVariable *GV =
