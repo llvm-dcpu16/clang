@@ -39,6 +39,8 @@ static unsigned getDefaultParsingOptions() {
     options |= CXTranslationUnit_CacheCompletionResults;
   if (getenv("CINDEXTEST_COMPLETION_NO_CACHING"))
     options &= ~CXTranslationUnit_CacheCompletionResults;
+  if (getenv("CINDEXTEST_SKIP_FUNCTION_BODIES"))
+    options |= CXTranslationUnit_SkipFunctionBodies;
   
   return options;
 }
@@ -178,6 +180,20 @@ static void PrintRange(CXSourceRange R, const char *str) {
 
 int want_display_name = 0;
 
+static void printVersion(const char *Prefix, CXVersion Version) {
+  if (Version.Major < 0)
+    return;
+  printf("%s%d", Prefix, Version.Major);
+  
+  if (Version.Minor < 0)
+    return;
+  printf(".%d", Version.Minor);
+
+  if (Version.Subminor < 0)
+    return;
+  printf(".%d", Version.Subminor);
+}
+
 static void PrintCursor(CXCursor Cursor) {
   CXTranslationUnit TU = clang_Cursor_getTranslationUnit(Cursor);
   if (clang_isInvalid(Cursor.kind)) {
@@ -195,7 +211,14 @@ static void PrintCursor(CXCursor Cursor) {
     unsigned RefNameRangeNr;
     CXSourceRange CursorExtent;
     CXSourceRange RefNameRange;
-
+    int AlwaysUnavailable;
+    int AlwaysDeprecated;
+    CXString UnavailableMessage;
+    CXString DeprecatedMessage;
+    CXPlatformAvailability PlatformAvailability[2];
+    int NumPlatformAvailability;
+    int I;
+    
     ks = clang_getCursorKindSpelling(Cursor.kind);
     string = want_display_name? clang_getCursorDisplayName(Cursor) 
                               : clang_getCursorSpelling(Cursor);
@@ -246,6 +269,47 @@ static void PrintCursor(CXCursor Cursor) {
         printf(" (inaccessible)");
         break;
     }
+    
+    NumPlatformAvailability
+      = clang_getCursorPlatformAvailability(Cursor,
+                                            &AlwaysDeprecated,
+                                            &DeprecatedMessage,
+                                            &AlwaysUnavailable,
+                                            &UnavailableMessage,
+                                            PlatformAvailability, 2);
+    if (AlwaysUnavailable) {
+      printf("  (always unavailable: \"%s\")",
+             clang_getCString(UnavailableMessage));
+    } else if (AlwaysDeprecated) {
+      printf("  (always deprecated: \"%s\")",
+             clang_getCString(DeprecatedMessage));
+    } else {
+      for (I = 0; I != NumPlatformAvailability; ++I) {
+        if (I >= 2)
+          break;
+        
+        printf("  (%s", clang_getCString(PlatformAvailability[I].Platform));
+        if (PlatformAvailability[I].Unavailable)
+          printf(", unavailable");
+        else {
+          printVersion(", introduced=", PlatformAvailability[I].Introduced);
+          printVersion(", deprecated=", PlatformAvailability[I].Deprecated);
+          printVersion(", obsoleted=", PlatformAvailability[I].Obsoleted);
+        }
+        if (clang_getCString(PlatformAvailability[I].Message)[0])
+          printf(", message=\"%s\"",
+                 clang_getCString(PlatformAvailability[I].Message));
+        printf(")");
+      }
+    }
+    for (I = 0; I != NumPlatformAvailability; ++I) {
+      if (I >= 2)
+        break;
+      clang_disposeCXPlatformAvailability(PlatformAvailability + I);
+    }
+    
+    clang_disposeString(DeprecatedMessage);
+    clang_disposeString(UnavailableMessage);
     
     if (clang_CXXMethod_isStatic(Cursor))
       printf(" (static)");
@@ -661,6 +725,23 @@ static enum CXChildVisitResult PrintTypeKind(CXCursor cursor, CXCursor p,
         CXString RS = clang_getTypeKindSpelling(RT.kind);
         printf(" [result=%s]", clang_getCString(RS));
         clang_disposeString(RS);
+      }
+    }
+    /* Print the argument types if they exist. */
+    {
+      int numArgs = clang_Cursor_getNumArguments(cursor);
+      if (numArgs != -1 && numArgs != 0) {
+        int i;
+        printf(" [args=");
+        for (i = 0; i < numArgs; ++i) {
+          CXType T = clang_getCursorType(clang_Cursor_getArgument(cursor, i));
+          if (T.kind != CXType_Invalid) {
+            CXString S = clang_getTypeKindSpelling(T.kind);
+            printf(" %s", clang_getCString(S));
+            clang_disposeString(S);
+          }
+        }
+        printf("]");
       }
     }
     /* Print if this is a non-POD type. */
@@ -2224,6 +2305,7 @@ int perform_token_annotation(int argc, const char **argv) {
     clang_getSpellingLocation(clang_getRangeEnd(extent),
                               0, &end_line, &end_column, 0);
     printf("%s: \"%s\" ", kind, clang_getCString(spelling));
+    clang_disposeString(spelling);
     PrintExtent(stdout, start_line, start_column, end_line, end_column);
     if (!clang_isInvalid(cursors[i].kind)) {
       printf(" ");
@@ -2569,9 +2651,9 @@ static void printDiagnosticSet(CXDiagnosticSet Diags, unsigned indent) {
     CXSourceLocation DiagLoc;
     CXDiagnostic D;
     CXFile File;
-    CXString FileName, DiagSpelling, DiagOption;
+    CXString FileName, DiagSpelling, DiagOption, DiagCat;
     unsigned line, column, offset;
-    const char *DiagOptionStr = 0;
+    const char *DiagOptionStr = 0, *DiagCatStr = 0;
     
     D = clang_getDiagnosticInSet(Diags, i);
     DiagLoc = clang_getDiagnosticLocation(D);
@@ -2592,6 +2674,12 @@ static void printDiagnosticSet(CXDiagnosticSet Diags, unsigned indent) {
     DiagOptionStr = clang_getCString(DiagOption);
     if (DiagOptionStr) {
       fprintf(stderr, " [%s]", DiagOptionStr);
+    }
+    
+    DiagCat = clang_getDiagnosticCategoryText(D);
+    DiagCatStr = clang_getCString(DiagCat);
+    if (DiagCatStr) {
+      fprintf(stderr, " [%s]", DiagCatStr);
     }
     
     fprintf(stderr, "\n");

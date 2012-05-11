@@ -934,6 +934,7 @@ static bool IsGlobalLValue(APValue::LValueBase B) {
   case Expr::ObjCStringLiteralClass:
   case Expr::ObjCEncodeExprClass:
   case Expr::CXXTypeidExprClass:
+  case Expr::CXXUuidofExprClass:
     return true;
   case Expr::CallExprClass:
     return IsStringLiteralCall(cast<CallExpr>(E));
@@ -1071,8 +1072,8 @@ static bool CheckConstantExpression(EvalInfo &Info, SourceLocation DiagLoc,
     }
     for (RecordDecl::field_iterator I = RD->field_begin(), E = RD->field_end();
          I != E; ++I) {
-      if (!CheckConstantExpression(Info, DiagLoc, (*I)->getType(),
-                                   Value.getStructField((*I)->getFieldIndex())))
+      if (!CheckConstantExpression(Info, DiagLoc, I->getType(),
+                                   Value.getStructField(I->getFieldIndex())))
         return false;
     }
   }
@@ -1281,6 +1282,7 @@ static bool CastToDerivedClass(EvalInfo &Info, const Expr *E, LValue &Result,
   // Truncate the path to the subobject, and remove any derived-to-base offsets.
   const RecordDecl *RD = TruncatedType;
   for (unsigned I = TruncatedElements, N = D.Entries.size(); I != N; ++I) {
+    if (RD->isInvalidDecl()) return false;
     const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
     const CXXRecordDecl *Base = getAsBaseClass(D.Entries[I]);
     if (isVirtualBaseClass(D.Entries[I]))
@@ -1293,13 +1295,18 @@ static bool CastToDerivedClass(EvalInfo &Info, const Expr *E, LValue &Result,
   return true;
 }
 
-static void HandleLValueDirectBase(EvalInfo &Info, const Expr *E, LValue &Obj,
+static bool HandleLValueDirectBase(EvalInfo &Info, const Expr *E, LValue &Obj,
                                    const CXXRecordDecl *Derived,
                                    const CXXRecordDecl *Base,
                                    const ASTRecordLayout *RL = 0) {
-  if (!RL) RL = &Info.Ctx.getASTRecordLayout(Derived);
+  if (!RL) {
+    if (Derived->isInvalidDecl()) return false;
+    RL = &Info.Ctx.getASTRecordLayout(Derived);
+  }
+
   Obj.getLValueOffset() += RL->getBaseClassOffset(Base);
   Obj.addDecl(Info, E, Base, /*Virtual*/ false);
+  return true;
 }
 
 static bool HandleLValueBase(EvalInfo &Info, const Expr *E, LValue &Obj,
@@ -1307,10 +1314,8 @@ static bool HandleLValueBase(EvalInfo &Info, const Expr *E, LValue &Obj,
                              const CXXBaseSpecifier *Base) {
   const CXXRecordDecl *BaseDecl = Base->getType()->getAsCXXRecordDecl();
 
-  if (!Base->isVirtual()) {
-    HandleLValueDirectBase(Info, E, Obj, DerivedDecl, BaseDecl);
-    return true;
-  }
+  if (!Base->isVirtual())
+    return HandleLValueDirectBase(Info, E, Obj, DerivedDecl, BaseDecl);
 
   SubobjectDesignator &D = Obj.Designator;
   if (D.Invalid)
@@ -1322,6 +1327,7 @@ static bool HandleLValueBase(EvalInfo &Info, const Expr *E, LValue &Obj,
     return false;
 
   // Find the virtual base class.
+  if (DerivedDecl->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(DerivedDecl);
   Obj.getLValueOffset() += Layout.getVBaseClassOffset(BaseDecl);
   Obj.addDecl(Info, E, BaseDecl, /*Virtual*/ true);
@@ -1330,24 +1336,29 @@ static bool HandleLValueBase(EvalInfo &Info, const Expr *E, LValue &Obj,
 
 /// Update LVal to refer to the given field, which must be a member of the type
 /// currently described by LVal.
-static void HandleLValueMember(EvalInfo &Info, const Expr *E, LValue &LVal,
+static bool HandleLValueMember(EvalInfo &Info, const Expr *E, LValue &LVal,
                                const FieldDecl *FD,
                                const ASTRecordLayout *RL = 0) {
-  if (!RL)
+  if (!RL) {
+    if (FD->getParent()->isInvalidDecl()) return false;
     RL = &Info.Ctx.getASTRecordLayout(FD->getParent());
+  }
 
   unsigned I = FD->getFieldIndex();
   LVal.Offset += Info.Ctx.toCharUnitsFromBits(RL->getFieldOffset(I));
   LVal.addDecl(Info, E, FD);
+  return true;
 }
 
 /// Update LVal to refer to the given indirect field.
-static void HandleLValueIndirectMember(EvalInfo &Info, const Expr *E,
+static bool HandleLValueIndirectMember(EvalInfo &Info, const Expr *E,
                                        LValue &LVal,
                                        const IndirectFieldDecl *IFD) {
   for (IndirectFieldDecl::chain_iterator C = IFD->chain_begin(),
                                          CE = IFD->chain_end(); C != CE; ++C)
-    HandleLValueMember(Info, E, LVal, cast<FieldDecl>(*C));
+    if (!HandleLValueMember(Info, E, LVal, cast<FieldDecl>(*C)))
+      return false;
+  return true;
 }
 
 /// Get the size of the given type in char units.
@@ -1491,15 +1502,19 @@ static unsigned getBaseIndex(const CXXRecordDecl *Derived,
   llvm_unreachable("base class missing from derived class's bases list");
 }
 
-/// Extract the value of a character from a string literal.
+/// Extract the value of a character from a string literal. CharType is used to
+/// determine the expected signedness of the result -- a string literal used to
+/// initialize an array of 'signed char' or 'unsigned char' might contain chars
+/// of the wrong signedness.
 static APSInt ExtractStringLiteralCharacter(EvalInfo &Info, const Expr *Lit,
-                                            uint64_t Index) {
+                                            uint64_t Index, QualType CharType) {
   // FIXME: Support PredefinedExpr, ObjCEncodeExpr, MakeStringConstant
   const StringLiteral *S = dyn_cast<StringLiteral>(Lit);
   assert(S && "unexpected string literal expression kind");
+  assert(CharType->isIntegerType() && "unexpected character type");
 
   APSInt Value(S->getCharByteWidth() * Info.Ctx.getCharWidth(),
-    Lit->getType()->getArrayElementTypeNoTypeQual()->isUnsignedIntegerType());
+               CharType->isUnsignedIntegerType());
   if (Index < S->getLength())
     Value = S->getCodeUnit(Index);
   return Value;
@@ -1546,7 +1561,7 @@ static bool ExtractSubobject(EvalInfo &Info, const Expr *E,
         assert(I == N - 1 && "extracting subobject of character?");
         assert(!O->hasLValuePath() || O->getLValuePath().empty());
         Obj = APValue(ExtractStringLiteralCharacter(
-          Info, O->getLValueBase().get<const Expr*>(), Index));
+          Info, O->getLValueBase().get<const Expr*>(), Index, SubType));
         return true;
       } else if (O->getArrayInitializedElts() > Index)
         O = &O->getArrayInitializedElt(Index);
@@ -1947,22 +1962,27 @@ static const ValueDecl *HandleMemberPointerAccess(EvalInfo &Info,
     // The first class in the path is that of the lvalue.
     for (unsigned I = 1, N = MemPtr.Path.size(); I != N; ++I) {
       const CXXRecordDecl *Base = MemPtr.Path[N - I - 1];
-      HandleLValueDirectBase(Info, BO, LV, RD, Base);
+      if (!HandleLValueDirectBase(Info, BO, LV, RD, Base))
+        return 0;
       RD = Base;
     }
     // Finally cast to the class containing the member.
-    HandleLValueDirectBase(Info, BO, LV, RD, MemPtr.getContainingRecord());
+    if (!HandleLValueDirectBase(Info, BO, LV, RD, MemPtr.getContainingRecord()))
+      return 0;
   }
 
   // Add the member. Note that we cannot build bound member functions here.
   if (IncludeMember) {
-    if (const FieldDecl *FD = dyn_cast<FieldDecl>(MemPtr.getDecl()))
-      HandleLValueMember(Info, BO, LV, FD);
-    else if (const IndirectFieldDecl *IFD =
-               dyn_cast<IndirectFieldDecl>(MemPtr.getDecl()))
-      HandleLValueIndirectMember(Info, BO, LV, IFD);
-    else
+    if (const FieldDecl *FD = dyn_cast<FieldDecl>(MemPtr.getDecl())) {
+      if (!HandleLValueMember(Info, BO, LV, FD))
+        return 0;
+    } else if (const IndirectFieldDecl *IFD =
+                 dyn_cast<IndirectFieldDecl>(MemPtr.getDecl())) {
+      if (!HandleLValueIndirectMember(Info, BO, LV, IFD))
+        return 0;
+    } else {
       llvm_unreachable("can't construct reference to bound member function");
+    }
   }
 
   return MemPtr.getDecl();
@@ -2184,6 +2204,7 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
     Result = APValue(APValue::UninitStruct(), RD->getNumBases(),
                      std::distance(RD->field_begin(), RD->field_end()));
 
+  if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
 
   bool Success = true;
@@ -2207,11 +2228,13 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
              "base class initializers not in expected order");
       ++BaseIt;
 #endif
-      HandleLValueDirectBase(Info, (*I)->getInit(), Subobject, RD,
-                             BaseType->getAsCXXRecordDecl(), &Layout);
+      if (!HandleLValueDirectBase(Info, (*I)->getInit(), Subobject, RD,
+                                  BaseType->getAsCXXRecordDecl(), &Layout))
+        return false;
       Value = &Result.getStructBase(BasesSeen++);
     } else if (FieldDecl *FD = (*I)->getMember()) {
-      HandleLValueMember(Info, (*I)->getInit(), Subobject, FD, &Layout);
+      if (!HandleLValueMember(Info, (*I)->getInit(), Subobject, FD, &Layout))
+        return false;
       if (RD->isUnion()) {
         Result = APValue(FD);
         Value = &Result.getUnionValue();
@@ -2239,7 +2262,8 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
             *Value = APValue(APValue::UninitStruct(), CD->getNumBases(),
                              std::distance(CD->field_begin(), CD->field_end()));
         }
-        HandleLValueMember(Info, (*I)->getInit(), Subobject, FD);
+        if (!HandleLValueMember(Info, (*I)->getInit(), Subobject, FD))
+          return false;
         if (CD->isUnion())
           Value = &Value->getUnionValue();
         else
@@ -2768,9 +2792,11 @@ public:
       assert(BaseTy->getAs<RecordType>()->getDecl()->getCanonicalDecl() ==
              FD->getParent()->getCanonicalDecl() && "record / field mismatch");
       (void)BaseTy;
-      HandleLValueMember(this->Info, E, Result, FD);
+      if (!HandleLValueMember(this->Info, E, Result, FD))
+        return false;
     } else if (const IndirectFieldDecl *IFD = dyn_cast<IndirectFieldDecl>(MD)) {
-      HandleLValueIndirectMember(this->Info, E, Result, IFD);
+      if (!HandleLValueIndirectMember(this->Info, E, Result, IFD))
+        return false;
     } else
       return this->Error(E);
 
@@ -2868,6 +2894,7 @@ public:
   bool VisitStringLiteral(const StringLiteral *E) { return Success(E); }
   bool VisitObjCEncodeExpr(const ObjCEncodeExpr *E) { return Success(E); }
   bool VisitCXXTypeidExpr(const CXXTypeidExpr *E);
+  bool VisitCXXUuidofExpr(const CXXUuidofExpr *E);
   bool VisitArraySubscriptExpr(const ArraySubscriptExpr *E);
   bool VisitUnaryDeref(const UnaryOperator *E);
   bool VisitUnaryReal(const UnaryOperator *E);
@@ -2973,6 +3000,10 @@ bool LValueExprEvaluator::VisitCXXTypeidExpr(const CXXTypeidExpr *E) {
   return Success(E);
 }
 
+bool LValueExprEvaluator::VisitCXXUuidofExpr(const CXXUuidofExpr *E) {
+  return Success(E);
+} 
+
 bool LValueExprEvaluator::VisitMemberExpr(const MemberExpr *E) {
   // Handle static data members.
   if (const VarDecl *VD = dyn_cast<VarDecl>(E->getMemberDecl())) {
@@ -3063,7 +3094,7 @@ public:
   bool VisitUnaryAddrOf(const UnaryOperator *E);
   bool VisitObjCStringLiteral(const ObjCStringLiteral *E)
       { return Success(E); }
-  bool VisitObjCNumericLiteral(const ObjCNumericLiteral *E)
+  bool VisitObjCBoxedExpr(const ObjCBoxedExpr *E)
       { return Success(E); }    
   bool VisitAddrLabelExpr(const AddrLabelExpr *E)
       { return Success(E); }
@@ -3363,6 +3394,7 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
   Result = APValue(APValue::UninitStruct(), CD ? CD->getNumBases() : 0,
                    std::distance(RD->field_begin(), RD->field_end()));
 
+  if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
 
   if (CD) {
@@ -3371,7 +3403,8 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
            End = CD->bases_end(); I != End; ++I, ++Index) {
       const CXXRecordDecl *Base = I->getType()->getAsCXXRecordDecl();
       LValue Subobject = This;
-      HandleLValueDirectBase(Info, E, Subobject, CD, Base, &Layout);
+      if (!HandleLValueDirectBase(Info, E, Subobject, CD, Base, &Layout))
+        return false;
       if (!HandleClassZeroInitialization(Info, E, Base, Subobject,
                                          Result.getStructBase(Index)))
         return false;
@@ -3381,15 +3414,16 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
   for (RecordDecl::field_iterator I = RD->field_begin(), End = RD->field_end();
        I != End; ++I) {
     // -- if T is a reference type, no initialization is performed.
-    if ((*I)->getType()->isReferenceType())
+    if (I->getType()->isReferenceType())
       continue;
 
     LValue Subobject = This;
-    HandleLValueMember(Info, E, Subobject, *I, &Layout);
+    if (!HandleLValueMember(Info, E, Subobject, &*I, &Layout))
+      return false;
 
-    ImplicitValueInitExpr VIE((*I)->getType());
+    ImplicitValueInitExpr VIE(I->getType());
     if (!EvaluateInPlace(
-          Result.getStructField((*I)->getFieldIndex()), Info, Subobject, &VIE))
+          Result.getStructField(I->getFieldIndex()), Info, Subobject, &VIE))
       return false;
   }
 
@@ -3398,6 +3432,7 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
 
 bool RecordExprEvaluator::ZeroInitialization(const Expr *E) {
   const RecordDecl *RD = E->getType()->castAs<RecordType>()->getDecl();
+  if (RD->isInvalidDecl()) return false;
   if (RD->isUnion()) {
     // C++11 [dcl.init]p5: If T is a (possibly cv-qualified) union type, the
     // object's first non-static named data member is zero-initialized
@@ -3408,9 +3443,10 @@ bool RecordExprEvaluator::ZeroInitialization(const Expr *E) {
     }
 
     LValue Subobject = This;
-    HandleLValueMember(Info, E, Subobject, *I);
-    Result = APValue(*I);
-    ImplicitValueInitExpr VIE((*I)->getType());
+    if (!HandleLValueMember(Info, E, Subobject, &*I))
+      return false;
+    Result = APValue(&*I);
+    ImplicitValueInitExpr VIE(I->getType());
     return EvaluateInPlace(Result.getUnionValue(), Info, Subobject, &VIE);
   }
 
@@ -3460,6 +3496,7 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
     return false;
 
   const RecordDecl *RD = E->getType()->castAs<RecordType>()->getDecl();
+  if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
 
   if (RD->isUnion()) {
@@ -3474,7 +3511,8 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
     const Expr *InitExpr = E->getNumInits() ? E->getInit(0) : &VIE;
 
     LValue Subobject = This;
-    HandleLValueMember(Info, InitExpr, Subobject, Field, &Layout);
+    if (!HandleLValueMember(Info, InitExpr, Subobject, Field, &Layout))
+      return false;
     return EvaluateInPlace(Result.getUnionValue(), Info, Subobject, InitExpr);
   }
 
@@ -3497,15 +3535,16 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
 
     // FIXME: Diagnostics here should point to the end of the initializer
     // list, not the start.
-    HandleLValueMember(Info, HaveInit ? E->getInit(ElementNo) : E, Subobject,
-                       *Field, &Layout);
+    if (!HandleLValueMember(Info, HaveInit ? E->getInit(ElementNo) : E,
+                            Subobject, &*Field, &Layout))
+      return false;
 
     // Perform an implicit value-initialization for members beyond the end of
     // the initializer list.
     ImplicitValueInitExpr VIE(HaveInit ? Info.Ctx.IntTy : Field->getType());
 
     if (!EvaluateInPlace(
-          Result.getStructField((*Field)->getFieldIndex()),
+          Result.getStructField(Field->getFieldIndex()),
           Info, Subobject, HaveInit ? E->getInit(ElementNo++) : &VIE)) {
       if (!Info.keepEvaluatingAfterFailure())
         return false;
@@ -3518,6 +3557,8 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
 
 bool RecordExprEvaluator::VisitCXXConstructExpr(const CXXConstructExpr *E) {
   const CXXConstructorDecl *FD = E->getConstructor();
+  if (FD->isInvalidDecl() || FD->getParent()->isInvalidDecl()) return false;
+
   bool ZeroInit = E->requiresZeroInitialization();
   if (CheckTrivialDefaultConstructor(Info, E->getExprLoc(), FD, ZeroInit)) {
     // If we've already performed zero-initialization, we're already done.
@@ -3849,8 +3890,7 @@ bool ArrayExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
 
   // C++11 [dcl.init.string]p1: A char array [...] can be initialized by [...]
   // an appropriately-typed string literal enclosed in braces.
-  if (E->getNumInits() == 1 && E->getInit(0)->isGLValue() &&
-      Info.Ctx.hasSameUnqualifiedType(E->getType(), E->getInit(0)->getType())) {
+  if (E->isStringLiteralInit()) {
     LValue LV;
     if (!EvaluateLValue(E->getInit(0), LV, Info))
       return false;
@@ -4306,7 +4346,7 @@ bool IntExprEvaluator::TryEvaluateBuiltinObjectSize(const CallExpr *E) {
 }
 
 bool IntExprEvaluator::VisitCallExpr(const CallExpr *E) {
-  switch (E->isBuiltinCall()) {
+  switch (unsigned BuiltinOp = E->isBuiltinCall()) {
   default:
     return ExprEvaluatorBaseTy::VisitCallExpr(E);
 
@@ -4365,7 +4405,9 @@ bool IntExprEvaluator::VisitCallExpr(const CallExpr *E) {
       
     return Error(E);
 
-  case Builtin::BI__atomic_is_lock_free: {
+  case Builtin::BI__atomic_always_lock_free:
+  case Builtin::BI__atomic_is_lock_free:
+  case Builtin::BI__c11_atomic_is_lock_free: {
     APSInt SizeVal;
     if (!EvaluateInteger(E->getArg(0), SizeVal, Info))
       return false;
@@ -4381,32 +4423,31 @@ bool IntExprEvaluator::VisitCallExpr(const CallExpr *E) {
 
     // Check power-of-two.
     CharUnits Size = CharUnits::fromQuantity(SizeVal.getZExtValue());
-    if (!Size.isPowerOfTwo())
-#if 0
-      // FIXME: Suppress this folding until the ABI for the promotion width
-      // settles.
-      return Success(0, E);
-#else
-      return Error(E);
-#endif
+    if (Size.isPowerOfTwo()) {
+      // Check against inlining width.
+      unsigned InlineWidthBits =
+          Info.Ctx.getTargetInfo().getMaxAtomicInlineWidth();
+      if (Size <= Info.Ctx.toCharUnitsFromBits(InlineWidthBits)) {
+        if (BuiltinOp == Builtin::BI__c11_atomic_is_lock_free ||
+            Size == CharUnits::One() ||
+            E->getArg(1)->isNullPointerConstant(Info.Ctx,
+                                                Expr::NPC_NeverValueDependent))
+          // OK, we will inline appropriately-aligned operations of this size,
+          // and _Atomic(T) is appropriately-aligned.
+          return Success(1, E);
 
-#if 0
-    // Check against promotion width.
-    // FIXME: Suppress this folding until the ABI for the promotion width
-    // settles.
-    unsigned PromoteWidthBits =
-        Info.Ctx.getTargetInfo().getMaxAtomicPromoteWidth();
-    if (Size > Info.Ctx.toCharUnitsFromBits(PromoteWidthBits))
-      return Success(0, E);
-#endif
+        QualType PointeeType = E->getArg(1)->IgnoreImpCasts()->getType()->
+          castAs<PointerType>()->getPointeeType();
+        if (!PointeeType->isIncompleteType() &&
+            Info.Ctx.getTypeAlignInChars(PointeeType) >= Size) {
+          // OK, we will inline operations on this object.
+          return Success(1, E);
+        }
+      }
+    }
 
-    // Check against inlining width.
-    unsigned InlineWidthBits =
-        Info.Ctx.getTargetInfo().getMaxAtomicInlineWidth();
-    if (Size <= Info.Ctx.toCharUnitsFromBits(InlineWidthBits))
-      return Success(1, E);
-
-    return Error(E);
+    return BuiltinOp == Builtin::BI__atomic_always_lock_free ?
+        Success(0, E) : Error(E);
   }
   }
 }
@@ -5078,14 +5119,37 @@ bool IntExprEvaluator::VisitBinaryOperator(const BinaryOperator *E) {
         }
       }
 
+      // The comparison here must be unsigned, and performed with the same
+      // width as the pointer.
+      unsigned PtrSize = Info.Ctx.getTypeSize(LHSTy);
+      uint64_t CompareLHS = LHSOffset.getQuantity();
+      uint64_t CompareRHS = RHSOffset.getQuantity();
+      assert(PtrSize <= 64 && "Unexpected pointer width");
+      uint64_t Mask = ~0ULL >> (64 - PtrSize);
+      CompareLHS &= Mask;
+      CompareRHS &= Mask;
+
+      // If there is a base and this is a relational operator, we can only
+      // compare pointers within the object in question; otherwise, the result
+      // depends on where the object is located in memory.
+      if (!LHSValue.Base.isNull() && E->isRelationalOp()) {
+        QualType BaseTy = getType(LHSValue.Base);
+        if (BaseTy->isIncompleteType())
+          return Error(E);
+        CharUnits Size = Info.Ctx.getTypeSizeInChars(BaseTy);
+        uint64_t OffsetLimit = Size.getQuantity();
+        if (CompareLHS > OffsetLimit || CompareRHS > OffsetLimit)
+          return Error(E);
+      }
+
       switch (E->getOpcode()) {
       default: llvm_unreachable("missing comparison operator");
-      case BO_LT: return Success(LHSOffset < RHSOffset, E);
-      case BO_GT: return Success(LHSOffset > RHSOffset, E);
-      case BO_LE: return Success(LHSOffset <= RHSOffset, E);
-      case BO_GE: return Success(LHSOffset >= RHSOffset, E);
-      case BO_EQ: return Success(LHSOffset == RHSOffset, E);
-      case BO_NE: return Success(LHSOffset != RHSOffset, E);
+      case BO_LT: return Success(CompareLHS < CompareRHS, E);
+      case BO_GT: return Success(CompareLHS > CompareRHS, E);
+      case BO_LE: return Success(CompareLHS <= CompareRHS, E);
+      case BO_GE: return Success(CompareLHS >= CompareRHS, E);
+      case BO_EQ: return Success(CompareLHS == CompareRHS, E);
+      case BO_NE: return Success(CompareLHS != CompareRHS, E);
       }
     }
   }
@@ -5247,6 +5311,7 @@ bool IntExprEvaluator::VisitOffsetOfExpr(const OffsetOfExpr *OOE) {
       if (!RT)
         return Error(OOE);
       RecordDecl *RD = RT->getDecl();
+      if (RD->isInvalidDecl()) return false;
       const ASTRecordLayout &RL = Info.Ctx.getASTRecordLayout(RD);
       unsigned i = MemberDecl->getFieldIndex();
       assert(i < RL.getFieldCount() && "offsetof field in wrong type");
@@ -5268,6 +5333,7 @@ bool IntExprEvaluator::VisitOffsetOfExpr(const OffsetOfExpr *OOE) {
       if (!RT)
         return Error(OOE);
       RecordDecl *RD = RT->getDecl();
+      if (RD->isInvalidDecl()) return false;
       const ASTRecordLayout &RL = Info.Ctx.getASTRecordLayout(RD);
 
       // Find the base class itself.
@@ -6468,7 +6534,7 @@ static ICEDiag CheckICE(const Expr* E, ASTContext &Ctx) {
   case Expr::CXXDependentScopeMemberExprClass:
   case Expr::UnresolvedMemberExprClass:
   case Expr::ObjCStringLiteralClass:
-  case Expr::ObjCNumericLiteralClass:
+  case Expr::ObjCBoxedExprClass:
   case Expr::ObjCArrayLiteralClass:
   case Expr::ObjCDictionaryLiteralClass:
   case Expr::ObjCEncodeExprClass:

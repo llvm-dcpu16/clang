@@ -94,7 +94,22 @@ static CXTypeKind GetTypeKind(QualType T) {
 
 
 CXType cxtype::MakeCXType(QualType T, CXTranslationUnit TU) {
-  CXTypeKind TK = GetTypeKind(T);
+  CXTypeKind TK = CXType_Invalid;
+
+  if (TU) {
+    ASTContext &Ctx = static_cast<ASTUnit *>(TU->TUData)->getASTContext();
+    if (Ctx.getLangOpts().ObjC1) {
+      if (Ctx.isObjCIdType(T))
+        TK = CXType_ObjCId;
+      else if (Ctx.isObjCClassType(T))
+        TK = CXType_ObjCClass;
+      else if (Ctx.isObjCSelType(T))
+        TK = CXType_ObjCSel;
+    }
+  }
+  if (TK == CXType_Invalid)
+    TK = GetTypeKind(T);
+
   CXType CT = { TK, { TK == CXType_Invalid ? 0 : T.getAsOpaquePtr(), TU }};
   return CT;
 }
@@ -455,10 +470,10 @@ CXCallingConv clang_getFunctionTypeCallingConv(CXType X) {
   return CXCallingConv_Invalid;
 }
 
-unsigned clang_getNumArgTypes(CXType X) {
+int clang_getNumArgTypes(CXType X) {
   QualType T = GetQualType(X);
   if (T.isNull())
-    return UINT_MAX;
+    return -1;
   
   if (const FunctionProtoType *FD = T->getAs<FunctionProtoType>()) {
     return FD->getNumArgs();
@@ -468,7 +483,7 @@ unsigned clang_getNumArgTypes(CXType X) {
     return 0;
   }
   
-  return UINT_MAX;
+  return -1;
 }
 
 CXType clang_getArgType(CXType X, unsigned i) {

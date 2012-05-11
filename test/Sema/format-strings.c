@@ -1,7 +1,10 @@
-// RUN: %clang_cc1 -fsyntax-only -verify -Wformat-nonliteral %s
+// RUN: %clang_cc1 -fsyntax-only -verify -Wformat-nonliteral -isystem %S/Inputs %s
+// RUN: %clang_cc1 -fsyntax-only -verify -Wformat-nonliteral -isystem %S/Inputs -fno-signed-char %s
 
+#define __need_wint_t
 #include <stdarg.h>
-typedef __typeof(sizeof(int)) size_t;
+#include <stddef.h> // For wint_t and wchar_t
+
 typedef struct _FILE FILE;
 int fprintf(FILE *, const char *restrict, ...);
 int printf(const char *restrict, ...); // expected-note{{passing argument to parameter here}}
@@ -258,7 +261,6 @@ void f0(int_t x) { printf("%d\n", x); }
 
 // Unicode test cases.  These are possibly specific to Mac OS X.  If so, they should
 // eventually be moved into a separate test.
-typedef __WCHAR_TYPE__ wchar_t;
 
 void test_unicode_conversions(wchar_t *s) {
   printf("%S", s); // no-warning
@@ -332,17 +334,18 @@ void bug7377_bad_length_mod_usage() {
 }
 
 // PR 7981 - handle '%lc' (wint_t)
-#ifndef wint_t
-typedef int __darwin_wint_t;
-typedef __darwin_wint_t wint_t;
-#endif
 
 void pr7981(wint_t c, wchar_t c2) {
   printf("%lc", c); // no-warning
   printf("%lc", 1.0); // expected-warning{{the argument has type 'double'}}
   printf("%lc", (char) 1); // no-warning
-  printf("%lc", &c); // expected-warning{{the argument has type 'wint_t *' (aka 'int *')}}
+  printf("%lc", &c); // expected-warning{{the argument has type 'wint_t *'}}
+  // If wint_t and wchar_t are the same width and wint_t is signed where
+  // wchar_t is unsigned, an implicit conversion isn't possible.
+#if defined(__WINT_UNSIGNED__) || !defined(__WCHAR_UNSIGNED__) ||   \
+  __WINT_WIDTH__ > __WCHAR_WIDTH__
   printf("%lc", c2); // no-warning
+#endif
 }
 
 // <rdar://problem/8269537> -Wformat-security says NULL is not a string literal
@@ -520,4 +523,33 @@ void test_other_formats() {
   monformat(str); // expected-warning{{format string is not a string literal (potentially insecure)}}
   dateformat(""); // expected-warning{{format string is empty}}
   dateformat(str); // no-warning (using strftime non literal is not unsafe)
+}
+
+// Do not warn about unused arguments coming from system headers.
+// <rdar://problem/11317765>
+#include <format-unused-system-args.h>
+void test_unused_system_args(int x) {
+  PRINT1("%d\n", x); // no-warning{{extra argument is system header is OK}}
+}
+
+void pr12761(char c) {
+  // This should not warn even with -fno-signed-char.
+  printf("%hhx", c);
+}
+
+
+// Test that we correctly merge the format in both orders.
+extern void test14_foo(const char *, const char *, ...)
+     __attribute__((__format__(__printf__, 1, 3)));
+extern void test14_foo(const char *, const char *, ...)
+     __attribute__((__format__(__scanf__, 2, 3)));
+
+extern void test14_bar(const char *, const char *, ...)
+     __attribute__((__format__(__scanf__, 2, 3)));
+extern void test14_bar(const char *, const char *, ...)
+     __attribute__((__format__(__printf__, 1, 3)));
+
+void test14_zed(int *p) {
+  test14_foo("%", "%d", p); // expected-warning{{incomplete format specifier}}
+  test14_bar("%", "%d", p); // expected-warning{{incomplete format specifier}}
 }

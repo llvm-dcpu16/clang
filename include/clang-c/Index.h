@@ -35,6 +35,16 @@ extern "C" {
   #define CINDEX_LINKAGE
 #endif
 
+#ifdef __GNUC__
+  #define CINDEX_DEPRECATED __attribute__((deprecated))
+#else
+  #ifdef _MSC_VER
+    #define CINDEX_DEPRECATED __declspec(deprecated)
+  #else
+    #define CINDEX_DEPRECATED
+  #endif
+#endif
+
 /** \defgroup CINDEX libclang: C Interface to Clang
  *
  * The C Interface to Clang provides a relatively small API that exposes
@@ -122,6 +132,29 @@ enum CXAvailabilityKind {
    */
   CXAvailability_NotAccessible
 };
+
+/**
+ * \brief Describes a version number of the form major.minor.subminor.
+ */
+typedef struct CXVersion {
+  /**
+   * \brief The major version number, e.g., the '10' in '10.7.3'. A negative
+   * value indicates that there is no version number at all.
+   */
+  int Major;
+  /**
+   * \brief The minor version number, e.g., the '7' in '10.7.3'. This value
+   * will be negative if no minor version number was provided, e.g., for 
+   * version '10'.
+   */
+  int Minor;
+  /**
+   * \brief The subminor version number, e.g., the '3' in '10.7.3'. This value
+   * will be negative if no minor or subminor version number was provided,
+   * e.g., in version '10' or '10.7'.
+   */
+  int Subminor;
+} CXVersion;
   
 /**
  * \defgroup CINDEX_STRING String manipulation routines
@@ -830,14 +863,25 @@ CINDEX_LINKAGE CXString clang_getDiagnosticOption(CXDiagnostic Diag,
 CINDEX_LINKAGE unsigned clang_getDiagnosticCategory(CXDiagnostic);
 
 /**
- * \brief Retrieve the name of a particular diagnostic category.
+ * \brief Retrieve the name of a particular diagnostic category.  This
+ *  is now deprecated.  Use clang_getDiagnosticCategoryText()
+ *  instead.
  *
  * \param Category A diagnostic category number, as returned by 
  * \c clang_getDiagnosticCategory().
  *
  * \returns The name of the given diagnostic category.
  */
-CINDEX_LINKAGE CXString clang_getDiagnosticCategoryName(unsigned Category);
+CINDEX_DEPRECATED CINDEX_LINKAGE
+CXString clang_getDiagnosticCategoryName(unsigned Category);
+
+/**
+ * \brief Retrieve the diagnostic category text for a given diagnostic.
+ *
+ *
+ * \returns The text of the given diagnostic category.
+ */
+CINDEX_LINKAGE CXString clang_getDiagnosticCategoryText(CXDiagnostic);
   
 /**
  * \brief Determine the number of source ranges associated with the given
@@ -945,7 +989,7 @@ clang_getTranslationUnitSpelling(CXTranslationUnit CTUnit);
  * passed to the \c clang executable if it were being invoked out-of-process.
  * These command-line options will be parsed and will affect how the translation
  * unit is parsed. Note that the following options are ignored: '-c',
- * '-emit-ast', '-fsyntex-only' (which is the default), and '-o <output file>'.
+ * '-emit-ast', '-fsyntax-only' (which is the default), and '-o <output file>'.
  *
  * \param num_unsaved_files the number of unsaved file entries in \p
  * unsaved_files.
@@ -1048,7 +1092,16 @@ enum CXTranslationUnit_Flags {
    * Note: this is a *temporary* option that is available only while
    * we are testing C++ precompiled preamble support. It is deprecated.
    */
-  CXTranslationUnit_CXXChainedPCH = 0x20
+  CXTranslationUnit_CXXChainedPCH = 0x20,
+
+  /**
+   * \brief Used to indicate that function/method bodies should be skipped while
+   * parsing.
+   *
+   * This option can be used to search for declarations/definitions while
+   * ignoring the usages.
+   */
+  CXTranslationUnit_SkipFunctionBodies = 0x40
 };
 
 /**
@@ -1085,7 +1138,7 @@ CINDEX_LINKAGE unsigned clang_defaultEditingTranslationUnitOptions(void);
  * passed to the \c clang executable if it were being invoked out-of-process.
  * These command-line options will be parsed and will affect how the translation
  * unit is parsed. Note that the following options are ignored: '-c', 
- * '-emit-ast', '-fsyntex-only' (which is the default), and '-o <output file>'.
+ * '-emit-ast', '-fsyntax-only' (which is the default), and '-o <output file>'.
  *
  * \param num_command_line_args The number of command-line arguments in
  * \p command_line_args.
@@ -2135,7 +2188,8 @@ enum CXLinkageKind {
 CINDEX_LINKAGE enum CXLinkageKind clang_getCursorLinkage(CXCursor cursor);
 
 /**
- * \brief Determine the availability of the entity that this cursor refers to.
+ * \brief Determine the availability of the entity that this cursor refers to,
+ * taking the current target platform into account.
  *
  * \param cursor The cursor to query.
  *
@@ -2144,6 +2198,94 @@ CINDEX_LINKAGE enum CXLinkageKind clang_getCursorLinkage(CXCursor cursor);
 CINDEX_LINKAGE enum CXAvailabilityKind 
 clang_getCursorAvailability(CXCursor cursor);
 
+/**
+ * Describes the availability of a given entity on a particular platform, e.g.,
+ * a particular class might only be available on Mac OS 10.7 or newer.
+ */
+typedef struct CXPlatformAvailability {
+  /**
+   * \brief A string that describes the platform for which this structure
+   * provides availability information.
+   *
+   * Possible values are "ios" or "macosx".
+   */
+  CXString Platform;
+  /**
+   * \brief The version number in which this entity was introduced.
+   */
+  CXVersion Introduced;
+  /**
+   * \brief The version number in which this entity was deprecated (but is
+   * still available).
+   */
+  CXVersion Deprecated;
+  /**
+   * \brief The version number in which this entity was obsoleted, and therefore
+   * is no longer available.
+   */
+  CXVersion Obsoleted;
+  /**
+   * \brief Whether the entity is unconditionally unavailable on this platform.
+   */
+  int Unavailable;
+  /**
+   * \brief An optional message to provide to a user of this API, e.g., to
+   * suggest replacement APIs.
+   */
+  CXString Message;
+} CXPlatformAvailability;
+
+/**
+ * \brief Determine the availability of the entity that this cursor refers to
+ * on any platforms for which availability information is known.
+ *
+ * \param cursor The cursor to query.
+ *
+ * \param always_deprecated If non-NULL, will be set to indicate whether the 
+ * entity is deprecated on all platforms.
+ *
+ * \param deprecated_message If non-NULL, will be set to the message text 
+ * provided along with the unconditional deprecation of this entity. The client
+ * is responsible for deallocating this string.
+ *
+ * \param always_unavailabile If non-NULL, will be set to indicate whether the
+ * entity is unavailable on all platforms.
+ *
+ * \param unavailable_message If non-NULL, will be set to the message text
+ * provided along with the unconditional unavailability of this entity. The 
+ * client is responsible for deallocating this string.
+ *
+ * \param availability If non-NULL, an array of CXPlatformAvailability instances
+ * that will be populated with platform availability information, up to either
+ * the number of platforms for which availability information is available (as
+ * returned by this function) or \c availability_size, whichever is smaller.
+ *
+ * \param availability_size The number of elements available in the 
+ * \c availability array.
+ *
+ * \returns The number of platforms (N) for which availability information is
+ * available (which is unrelated to \c availability_size).
+ *
+ * Note that the client is responsible for calling 
+ * \c clang_disposeCXPlatformAvailability to free each of the 
+ * platform-availability structures returned. There are 
+ * \c min(N, availability_size) such structures.
+ */
+CINDEX_LINKAGE int
+clang_getCursorPlatformAvailability(CXCursor cursor,
+                                    int *always_deprecated,
+                                    CXString *deprecated_message,
+                                    int *always_unavailable,
+                                    CXString *unavailable_message,
+                                    CXPlatformAvailability *availability,
+                                    int availability_size);
+
+/**
+ * \brief Free the memory associated with a \c CXPlatformAvailability structure.
+ */
+CINDEX_LINKAGE void
+clang_disposeCXPlatformAvailability(CXPlatformAvailability *availability);
+  
 /**
  * \brief Describe the "language" of the entity referred to by a cursor.
  */
@@ -2525,6 +2667,22 @@ CINDEX_LINKAGE long long clang_getEnumConstantDeclValue(CXCursor C);
 CINDEX_LINKAGE unsigned long long clang_getEnumConstantDeclUnsignedValue(CXCursor C);
 
 /**
+ * \brief Retrieve the number of non-variadic arguments associated with a given
+ * cursor.
+ *
+ * If a cursor that is not a function or method is passed in, -1 is returned.
+ */
+CINDEX_LINKAGE int clang_Cursor_getNumArguments(CXCursor C);
+
+/**
+ * \brief Retrieve the argument cursor of a function or method.
+ *
+ * If a cursor that is not a function or method is passed in or the index
+ * exceeds the number of arguments, an invalid cursor is returned.
+ */
+CINDEX_LINKAGE CXCursor clang_Cursor_getArgument(CXCursor C, unsigned i);
+
+/**
  * \determine Determine whether two CXTypes represent the same type.
  *
  * \returns non-zero if the CXTypes represent the same type and 
@@ -2598,9 +2756,9 @@ CINDEX_LINKAGE CXType clang_getResultType(CXType T);
 /**
  * \brief Retrieve the number of non-variadic arguments associated with a function type.
  *
- * If a non-function type is passed in, UINT_MAX is returned.
+ * If a non-function type is passed in, -1 is returned.
  */
-CINDEX_LINKAGE unsigned clang_getNumArgTypes(CXType T);
+CINDEX_LINKAGE int clang_getNumArgTypes(CXType T);
 
 /**
  * \brief Retrieve the type of an argument of a function type.

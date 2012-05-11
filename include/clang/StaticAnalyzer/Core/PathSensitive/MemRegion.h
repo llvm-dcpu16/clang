@@ -197,8 +197,9 @@ public:
   }
 };
 
-/// \class The region of the static variables within the current CodeTextRegion
+/// \brief The region of the static variables within the current CodeTextRegion
 /// scope.
+///
 /// Currently, only the static locals are placed there, so we know that these
 /// variables do not get invalidated by calls to other functions.
 class StaticGlobalSpaceRegion : public GlobalsSpaceRegion {
@@ -221,7 +222,7 @@ public:
   }
 };
 
-/// \class The region for all the non-static global variables.
+/// \brief The region for all the non-static global variables.
 ///
 /// This class is further split into subclasses for efficient implementation of
 /// invalidating a set of related global values as is done in
@@ -245,7 +246,7 @@ public:
   }
 };
 
-/// \class The region containing globals which are defined in system/external
+/// \brief The region containing globals which are defined in system/external
 /// headers and are considered modifiable by system calls (ex: errno).
 class GlobalSystemSpaceRegion : public NonStaticGlobalSpaceRegion {
   friend class MemRegionManager;
@@ -262,7 +263,7 @@ public:
   }
 };
 
-/// \class The region containing globals which are considered not to be modified
+/// \brief The region containing globals which are considered not to be modified
 /// or point to data which could be modified as a result of a function call
 /// (system or internal). Ex: Const global scalars would be modeled as part of
 /// this region. This region also includes most system globals since they have
@@ -282,7 +283,7 @@ public:
   }
 };
 
-/// \class The region containing globals which can be modified by calls to
+/// \brief The region containing globals which can be modified by calls to
 /// "internally" defined functions - (for now just) functions other then system
 /// calls.
 class GlobalInternalSpaceRegion : public NonStaticGlobalSpaceRegion {
@@ -579,25 +580,37 @@ class BlockDataRegion : public SubRegion {
   const BlockTextRegion *BC;
   const LocationContext *LC; // Can be null */
   void *ReferencedVars;
+  void *OriginalVars;
 
   BlockDataRegion(const BlockTextRegion *bc, const LocationContext *lc,
                   const MemRegion *sreg)
-  : SubRegion(sreg, BlockDataRegionKind), BC(bc), LC(lc), ReferencedVars(0) {}
+  : SubRegion(sreg, BlockDataRegionKind), BC(bc), LC(lc),
+    ReferencedVars(0), OriginalVars(0) {}
 
-public:  
+public:
   const BlockTextRegion *getCodeRegion() const { return BC; }
   
   const BlockDecl *getDecl() const { return BC->getDecl(); }
   
   class referenced_vars_iterator {
     const MemRegion * const *R;
+    const MemRegion * const *OriginalR;
   public:
-    explicit referenced_vars_iterator(const MemRegion * const *r) : R(r) {}
+    explicit referenced_vars_iterator(const MemRegion * const *r,
+                                      const MemRegion * const *originalR)
+      : R(r), OriginalR(originalR) {}
     
     operator const MemRegion * const *() const {
       return R;
     }
-    
+  
+    const MemRegion *getCapturedRegion() const {
+      return *R;
+    }
+    const MemRegion *getOriginalRegion() const {
+      return *OriginalR;
+    }
+
     const VarRegion* operator*() const {
       return cast<VarRegion>(*R);
     }
@@ -610,6 +623,7 @@ public:
     }
     referenced_vars_iterator &operator++() {
       ++R;
+      ++OriginalR;
       return *this;
     }
   };

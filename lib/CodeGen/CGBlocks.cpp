@@ -458,18 +458,22 @@ static void computeBlockInfo(CodeGenModule &CGM, CodeGenFunction *CGF,
     }
   }
 
+  assert(endAlign == getLowBit(blockSize));
+
   // At this point, we just have to add padding if the end align still
   // isn't aligned right.
   if (endAlign < maxFieldAlign) {
-    CharUnits padding = maxFieldAlign - endAlign;
+    CharUnits newBlockSize = blockSize.RoundUpToAlignment(maxFieldAlign);
+    CharUnits padding = newBlockSize - blockSize;
 
     elementTypes.push_back(llvm::ArrayType::get(CGM.Int8Ty,
                                                 padding.getQuantity()));
-    blockSize += padding;
-
-    endAlign = getLowBit(blockSize);
-    assert(endAlign >= maxFieldAlign);
+    blockSize = newBlockSize;
+    endAlign = getLowBit(blockSize); // might be > maxFieldAlign
   }
+
+  assert(endAlign >= maxFieldAlign);
+  assert(endAlign == getLowBit(blockSize));
 
   // Slam everything else on now.  This works because they have
   // strictly decreasing alignment and we expect that size is always a
@@ -491,6 +495,8 @@ static void computeBlockInfo(CodeGenModule &CGM, CodeGenFunction *CGF,
 /// a full-expression so that the block's cleanups are pushed at the
 /// right place in the stack.
 static void enterBlockScope(CodeGenFunction &CGF, BlockDecl *block) {
+  assert(CGF.HaveInsertPoint());
+
   // Allocate the block info and place it at the head of the list.
   CGBlockInfo &blockInfo =
     *new CGBlockInfo(block, CGF.CurFn->getName());
@@ -1128,15 +1134,17 @@ CodeGenFunction::GenerateBlockFunction(GlobalDecl GD,
       const VarDecl *variable = ci->getVariable();
       DI->EmitLocation(Builder, variable->getLocation());
 
-      const CGBlockInfo::Capture &capture = blockInfo.getCapture(variable);
-      if (capture.isConstant()) {
-        DI->EmitDeclareOfAutoVariable(variable, LocalDeclMap[variable],
-                                      Builder);
-        continue;
-      }
+      if (CGM.getCodeGenOpts().DebugInfo >= CodeGenOptions::LimitedDebugInfo) {
+        const CGBlockInfo::Capture &capture = blockInfo.getCapture(variable);
+        if (capture.isConstant()) {
+          DI->EmitDeclareOfAutoVariable(variable, LocalDeclMap[variable],
+                                        Builder);
+          continue;
+        }
 
-      DI->EmitDeclareOfBlockDeclRefVariable(variable, BlockPointer,
-                                            Builder, blockInfo);
+        DI->EmitDeclareOfBlockDeclRefVariable(variable, BlockPointer,
+                                              Builder, blockInfo);
+      }
     }
   }
 
@@ -1208,7 +1216,7 @@ CodeGenFunction::GenerateCopyHelperFunction(const CGBlockInfo &blockInfo) {
                                           SC_Static,
                                           SC_None,
                                           false,
-                                          true);
+                                          false);
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
@@ -1323,7 +1331,7 @@ CodeGenFunction::GenerateDestroyHelperFunction(const CGBlockInfo &blockInfo) {
                                           SourceLocation(), II, C.VoidTy, 0,
                                           SC_Static,
                                           SC_None,
-                                          false, true);
+                                          false, false);
   StartFunction(FD, C.VoidTy, Fn, FI, args, SourceLocation());
 
   llvm::Type *structPtrTy = blockInfo.StructureType->getPointerTo();
@@ -1601,7 +1609,7 @@ generateByrefCopyHelper(CodeGenFunction &CGF,
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
                                           SC_None,
-                                          false, true);
+                                          false, false);
 
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
@@ -1672,7 +1680,7 @@ generateByrefDisposeHelper(CodeGenFunction &CGF,
                                           SourceLocation(), II, R, 0,
                                           SC_Static,
                                           SC_None,
-                                          false, true);
+                                          false, false);
   CGF.StartFunction(FD, R, Fn, FI, args, SourceLocation());
 
   if (byrefInfo.needsDispose()) {

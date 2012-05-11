@@ -79,6 +79,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S) {
   case Stmt::CompoundStmtClass:
   case Stmt::DeclStmtClass:
   case Stmt::LabelStmtClass:
+  case Stmt::AttributedStmtClass:
   case Stmt::GotoStmtClass:
   case Stmt::BreakStmtClass:
   case Stmt::ContinueStmtClass:
@@ -173,6 +174,8 @@ bool CodeGenFunction::EmitSimpleStmt(const Stmt *S) {
   case Stmt::CompoundStmtClass: EmitCompoundStmt(cast<CompoundStmt>(*S)); break;
   case Stmt::DeclStmtClass:     EmitDeclStmt(cast<DeclStmt>(*S));         break;
   case Stmt::LabelStmtClass:    EmitLabelStmt(cast<LabelStmt>(*S));       break;
+  case Stmt::AttributedStmtClass:
+                            EmitAttributedStmt(cast<AttributedStmt>(*S)); break;
   case Stmt::GotoStmtClass:     EmitGotoStmt(cast<GotoStmt>(*S));         break;
   case Stmt::BreakStmtClass:    EmitBreakStmt(cast<BreakStmt>(*S));       break;
   case Stmt::ContinueStmtClass: EmitContinueStmt(cast<ContinueStmt>(*S)); break;
@@ -329,6 +332,10 @@ void CodeGenFunction::EmitLabel(const LabelDecl *D) {
 
 void CodeGenFunction::EmitLabelStmt(const LabelStmt &S) {
   EmitLabel(S.getDecl());
+  EmitStmt(S.getSubStmt());
+}
+
+void CodeGenFunction::EmitAttributedStmt(const AttributedStmt &S) {
   EmitStmt(S.getSubStmt());
 }
 
@@ -778,7 +785,7 @@ void CodeGenFunction::EmitReturnStmt(const ReturnStmt &S) {
 void CodeGenFunction::EmitDeclStmt(const DeclStmt &S) {
   // As long as debug info is modeled with instructions, we have to ensure we
   // have a place to insert here and write the stop point here.
-  if (getDebugInfo() && HaveInsertPoint())
+  if (HaveInsertPoint())
     EmitStopPoint(&S);
 
   for (DeclStmt::const_decl_iterator I = S.decl_begin(), E = S.decl_end();
@@ -892,7 +899,7 @@ void CodeGenFunction::EmitCaseStmt(const CaseStmt &S) {
 
   // If the body of the case is just a 'break', and if there was no fallthrough,
   // try to not emit an empty block.
-  if (isa<BreakStmt>(S.getSubStmt())) {
+  if ((CGM.getCodeGenOpts().OptimizationLevel > 0) && isa<BreakStmt>(S.getSubStmt())) {
     JumpDest Block = BreakContinueStack.back().BreakBlock;
     
     // Only do this optimization if there are no cleanups that need emitting.
@@ -1178,8 +1185,8 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
       for (unsigned i = 0, e = CaseStmts.size(); i != e; ++i)
         EmitStmt(CaseStmts[i]);
 
-      // Now we want to restore the saved switch instance so that nested switches
-      // continue to function properly
+      // Now we want to restore the saved switch instance so that nested
+      // switches continue to function properly
       SwitchInsn = SavedSwitchInsn;
 
       return;
@@ -1434,7 +1441,7 @@ void CodeGenFunction::EmitAsmStmt(const AsmStmt &S) {
   std::vector<QualType> ResultRegQualTys;
   std::vector<llvm::Type *> ResultRegTypes;
   std::vector<llvm::Type *> ResultTruncRegTypes;
-  std::vector<llvm::Type*> ArgTypes;
+  std::vector<llvm::Type *> ArgTypes;
   std::vector<llvm::Value*> Args;
 
   // Keep track of inout constraints.

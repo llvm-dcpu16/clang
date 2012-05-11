@@ -96,6 +96,7 @@ def CXX11Compat : DiagGroup<"c++11-compat",
 def : DiagGroup<"c++0x-compat", [CXX11Compat]>;
 
 def : DiagGroup<"effc++">;
+def DivZero : DiagGroup<"division-by-zero">;
 def ExitTimeDestructors : DiagGroup<"exit-time-destructors">;
 def FlexibleArrayExtensions : DiagGroup<"flexible-array-extensions">;
 def FourByteMultiChar : DiagGroup<"four-char-constants">;
@@ -145,6 +146,7 @@ def : DiagGroup<"overflow">;
 def OverlengthStrings : DiagGroup<"overlength-strings">;
 def OverloadedVirtual : DiagGroup<"overloaded-virtual">;
 def ObjCPropertyImpl : DiagGroup<"objc-property-implementation">;
+def ObjCPropertyNoAttribute : DiagGroup<"objc-property-no-attribute">;
 def ObjCMissingSuperCalls : DiagGroup<"objc-missing-super-calls">;
 def ObjCRetainBlockProperty : DiagGroup<"objc-noncopy-retain-block-property">;
 def ObjCReadonlyPropertyHasSetter : DiagGroup<"objc-readonly-with-setter-property">;
@@ -206,6 +208,7 @@ def MethodDuplicate : DiagGroup<"duplicate-method-match">;
 def CoveredSwitchDefault : DiagGroup<"covered-switch-default">;
 def SwitchEnum     : DiagGroup<"switch-enum">;
 def Switch         : DiagGroup<"switch">;
+def ImplicitFallthrough  : DiagGroup<"implicit-fallthrough">;
 def Trigraphs      : DiagGroup<"trigraphs">;
 
 def : DiagGroup<"type-limits">;
@@ -354,7 +357,10 @@ def Most : DiagGroup<"most", [
  ]>;
 
 // Thread Safety warnings 
-def ThreadSafety : DiagGroup<"thread-safety">;
+def ThreadSafetyAttributes : DiagGroup<"thread-safety-attributes">;
+def ThreadSafetyAnalysis : DiagGroup<"thread-safety-analysis">;
+def ThreadSafety : DiagGroup<"thread-safety", 
+                             [ThreadSafetyAttributes, ThreadSafetyAnalysis]>;
 
 // Note that putting warnings in -Wall will not disable them by default. If a
 // warning should be active _only_ when -Wall is passed in, mark it as

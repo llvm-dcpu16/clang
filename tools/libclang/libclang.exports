@@ -4,9 +4,11 @@ clang_CXIndex_getGlobalOptions
 clang_CXIndex_setGlobalOptions
 clang_CXXMethod_isStatic
 clang_CXXMethod_isVirtual
+clang_Cursor_getArgument
+clang_Cursor_getNumArguments
+clang_Cursor_getObjCSelectorIndex
 clang_Cursor_getSpellingNameRange
 clang_Cursor_getTranslationUnit
-clang_Cursor_getObjCSelectorIndex
 clang_Cursor_isNull
 clang_IndexAction_create
 clang_IndexAction_dispose
@@ -41,6 +43,7 @@ clang_disposeDiagnostic
 clang_disposeDiagnosticSet
 clang_disposeIndex
 clang_disposeOverriddenCursors
+clang_disposeCXPlatformAvailability
 clang_disposeString
 clang_disposeTokens
 clang_disposeTranslationUnit
@@ -83,6 +86,7 @@ clang_getCursorLanguage
 clang_getCursorLexicalParent
 clang_getCursorLinkage
 clang_getCursorLocation
+clang_getCursorPlatformAvailability
 clang_getCursorReferenceNameRange
 clang_getCursorReferenced
 clang_getCursorResultType
@@ -95,6 +99,7 @@ clang_getDefinitionSpellingAndExtent
 clang_getDiagnostic
 clang_getDiagnosticCategory
 clang_getDiagnosticCategoryName
+clang_getDiagnosticCategoryText
 clang_getDiagnosticFixIt
 clang_getDiagnosticInSet
 clang_getDiagnosticLocation

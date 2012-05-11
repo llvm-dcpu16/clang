@@ -242,9 +242,27 @@ bool Preprocessor::HandleMacroExpandedIdentifier(Token &Identifier,
 
   // Remember where the token is expanded.
   SourceLocation ExpandLoc = Identifier.getLocation();
+  SourceRange ExpansionRange(ExpandLoc, ExpansionEnd);
 
-  if (Callbacks) Callbacks->MacroExpands(Identifier, MI,
-                                         SourceRange(ExpandLoc, ExpansionEnd));
+  if (Callbacks) {
+    if (InMacroArgs) {
+      // We can have macro expansion inside a conditional directive while
+      // reading the function macro arguments. To ensure, in that case, that
+      // MacroExpands callbacks still happen in source order, queue this
+      // callback to have it happen after the function macro callback.
+      DelayedMacroExpandsCallbacks.push_back(
+                              MacroExpandsInfo(Identifier, MI, ExpansionRange));
+    } else {
+      Callbacks->MacroExpands(Identifier, MI, ExpansionRange);
+      if (!DelayedMacroExpandsCallbacks.empty()) {
+        for (unsigned i=0, e = DelayedMacroExpandsCallbacks.size(); i!=e; ++i) {
+          MacroExpandsInfo &Info = DelayedMacroExpandsCallbacks[i];
+          Callbacks->MacroExpands(Info.Tok, Info.MI, Info.Range);
+        }
+        DelayedMacroExpandsCallbacks.clear();
+      }
+    }
+  }
   
   // If we started lexing a macro, enter the macro expansion body.
 
@@ -634,6 +652,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("objc_subscripting", LangOpts.ObjCNonFragileABI)
            .Case("objc_array_literals", LangOpts.ObjC2)
            .Case("objc_dictionary_literals", LangOpts.ObjC2)
+           .Case("objc_boxed_expressions", LangOpts.ObjC2)
            .Case("arc_cf_code_audited", true)
            // C11 features
            .Case("c_alignas", LangOpts.C11)
@@ -649,6 +668,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("cxx_auto_type", LangOpts.CPlusPlus0x)
            .Case("cxx_constexpr", LangOpts.CPlusPlus0x)
            .Case("cxx_decltype", LangOpts.CPlusPlus0x)
+           .Case("cxx_decltype_incomplete_return_types", LangOpts.CPlusPlus0x)
            .Case("cxx_default_function_template_args", LangOpts.CPlusPlus0x)
            .Case("cxx_defaulted_functions", LangOpts.CPlusPlus0x)
            .Case("cxx_delegating_constructors", LangOpts.CPlusPlus0x)

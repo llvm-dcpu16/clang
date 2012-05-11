@@ -204,3 +204,41 @@ template<template<typename> Foo, // expected-error {{template template parameter
          template<typename> typename Bar, // expected-error {{template template parameter requires 'class' after the parameter list}}
          template<typename> struct Baz> // expected-error {{template template parameter requires 'class' after the parameter list}}
 void func();
+
+namespace ShadowedTagType {
+class Foo {
+ public:
+  enum Bar { X, Y };
+  void SetBar(Bar bar);
+  Bar Bar(); // expected-note 2 {{enum 'Bar' is hidden by a non-type declaration of 'Bar' here}}
+ private:
+  Bar bar_; // expected-error {{must use 'enum' tag to refer to type 'Bar' in this scope}}
+};
+void Foo::SetBar(Bar bar) { bar_ = bar; } // expected-error {{must use 'enum' tag to refer to type 'Bar' in this scope}}
+}
+
+#define NULL __null
+char c = NULL; // expected-warning {{implicit conversion of NULL constant to 'char'}}
+
+namespace arrow_suggest {
+
+template <typename T>
+class wrapped_ptr {
+ public:
+  wrapped_ptr(T* ptr) : ptr_(ptr) {}
+  T* operator->() { return ptr_; }
+ private:
+  T *ptr_;
+};
+
+class Worker {
+ public:
+  void DoSomething();
+};
+
+void test() {
+  wrapped_ptr<Worker> worker(new Worker);
+  worker.DoSomething(); // expected-error {{no member named 'DoSomething' in 'arrow_suggest::wrapped_ptr<arrow_suggest::Worker>'; did you mean to use '->' instead of '.'?}}
+}
+
+} // namespace arrow_suggest

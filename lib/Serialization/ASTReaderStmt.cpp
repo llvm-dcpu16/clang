@@ -159,9 +159,18 @@ void ASTStmtReader::VisitLabelStmt(LabelStmt *S) {
   S->setIdentLoc(ReadSourceLocation(Record, Idx));
 }
 
+void ASTStmtReader::VisitAttributedStmt(AttributedStmt *S) {
+  VisitStmt(S);
+  AttrVec Attrs;
+  Reader.ReadAttributes(F, Attrs, Record, Idx);
+  S->Attrs = Attrs;
+  S->SubStmt = Reader.ReadSubStmt();
+  S->AttrLoc = ReadSourceLocation(Record, Idx);
+}
+
 void ASTStmtReader::VisitIfStmt(IfStmt *S) {
   VisitStmt(S);
-  S->setConditionVariable(Reader.getContext(), 
+  S->setConditionVariable(Reader.getContext(),
                           ReadDeclAs<VarDecl>(Record, Idx));
   S->setCond(Reader.ReadSubExpr());
   S->setThen(Reader.ReadSubStmt());
@@ -790,21 +799,12 @@ void ASTStmtReader::VisitPseudoObjectExpr(PseudoObjectExpr *E) {
 
 void ASTStmtReader::VisitAtomicExpr(AtomicExpr *E) {
   VisitExpr(E);
-  E->setOp(AtomicExpr::AtomicOp(Record[Idx++]));
-  E->setPtr(Reader.ReadSubExpr());
-  E->setOrder(Reader.ReadSubExpr());
-  E->setNumSubExprs(2);
-  if (E->getOp() != AtomicExpr::Load) {
-    E->setVal1(Reader.ReadSubExpr());
-    E->setNumSubExprs(3);
-  }
-  if (E->isCmpXChg()) {
-    E->setOrderFail(Reader.ReadSubExpr());
-    E->setVal2(Reader.ReadSubExpr());
-    E->setNumSubExprs(5);
-  }
-  E->setBuiltinLoc(ReadSourceLocation(Record, Idx));
-  E->setRParenLoc(ReadSourceLocation(Record, Idx));
+  E->Op = AtomicExpr::AtomicOp(Record[Idx++]);
+  E->NumSubExprs = AtomicExpr::getNumSubExprs(E->Op);
+  for (unsigned I = 0; I != E->NumSubExprs; ++I)
+    E->SubExprs[I] = Reader.ReadSubExpr();
+  E->BuiltinLoc = ReadSourceLocation(Record, Idx);
+  E->RParenLoc = ReadSourceLocation(Record, Idx);
 }
 
 //===----------------------------------------------------------------------===//
@@ -816,12 +816,12 @@ void ASTStmtReader::VisitObjCStringLiteral(ObjCStringLiteral *E) {
   E->setAtLoc(ReadSourceLocation(Record, Idx));
 }
 
-void ASTStmtReader::VisitObjCNumericLiteral(ObjCNumericLiteral *E) {
+void ASTStmtReader::VisitObjCBoxedExpr(ObjCBoxedExpr *E) {
   VisitExpr(E);
   // could be one of several IntegerLiteral, FloatLiteral, etc.
-  E->Number = Reader.ReadSubStmt();
-  E->ObjCNumericLiteralMethod = ReadDeclAs<ObjCMethodDecl>(Record, Idx);
-  E->AtLoc = ReadSourceLocation(Record, Idx);
+  E->SubExpr = Reader.ReadSubStmt();
+  E->BoxingMethod = ReadDeclAs<ObjCMethodDecl>(Record, Idx);
+  E->Range = ReadSourceRange(Record, Idx);
 }
 
 void ASTStmtReader::VisitObjCArrayLiteral(ObjCArrayLiteral *E) {
@@ -1074,7 +1074,8 @@ void ASTStmtReader::VisitMSDependentExistsStmt(MSDependentExistsStmt *S) {
 
 void ASTStmtReader::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
   VisitCallExpr(E);
-  E->setOperator((OverloadedOperatorKind)Record[Idx++]);
+  E->Operator = (OverloadedOperatorKind)Record[Idx++];
+  E->Range = Reader.ReadSourceRange(F, Record, Idx);
 }
 
 void ASTStmtReader::VisitCXXConstructExpr(CXXConstructExpr *E) {
@@ -1639,6 +1640,10 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       S = new (Context) LabelStmt(Empty);
       break;
 
+    case STMT_ATTRIBUTED:
+      S = new (Context) AttributedStmt(Empty);
+      break;
+
     case STMT_IF:
       S = new (Context) IfStmt(Empty);
       break;
@@ -1884,8 +1889,8 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case EXPR_OBJC_STRING_LITERAL:
       S = new (Context) ObjCStringLiteral(Empty);
       break;
-    case EXPR_OBJC_NUMERIC_LITERAL:
-      S = new (Context) ObjCNumericLiteral(Empty);
+    case EXPR_OBJC_BOXED_EXPRESSION:
+      S = new (Context) ObjCBoxedExpr(Empty);
       break;
     case EXPR_OBJC_ARRAY_LITERAL:
       S = ObjCArrayLiteral::CreateEmpty(Context,

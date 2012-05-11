@@ -2121,7 +2121,7 @@ PushProtocolProperties(llvm::SmallPtrSet<const IdentifierInfo*,16> &PropertySet,
     PushProtocolProperties(PropertySet, Properties, Container, (*P), ObjCTypes);
   for (ObjCContainerDecl::prop_iterator I = PROTO->prop_begin(),
        E = PROTO->prop_end(); I != E; ++I) {
-    const ObjCPropertyDecl *PD = *I;
+    const ObjCPropertyDecl *PD = &*I;
     if (!PropertySet.insert(PD->getIdentifier()))
       continue;
     llvm::Constant *Prop[] = {
@@ -2152,7 +2152,7 @@ llvm::Constant *CGObjCCommonMac::EmitPropertyList(Twine Name,
   llvm::SmallPtrSet<const IdentifierInfo*, 16> PropertySet;
   for (ObjCContainerDecl::prop_iterator I = OCD->prop_begin(),
          E = OCD->prop_end(); I != E; ++I) {
-    const ObjCPropertyDecl *PD = *I;
+    const ObjCPropertyDecl *PD = &*I;
     PropertySet.insert(PD->getIdentifier());
     llvm::Constant *Prop[] = {
       GetPropertyName(PD->getIdentifier()),
@@ -2403,7 +2403,7 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
 
   for (ObjCImplementationDecl::propimpl_iterator
          i = ID->propimpl_begin(), e = ID->propimpl_end(); i != e; ++i) {
-    ObjCPropertyImplDecl *PID = *i;
+    ObjCPropertyImplDecl *PID = &*i;
 
     if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize) {
       ObjCPropertyDecl *PD = PID->getPropertyDecl();
@@ -3612,7 +3612,8 @@ enum ImageInfoFlags {
 
   // A flag indicating that the module has no instances of a @synthesize of a
   // superclass variable. <rdar://problem/6803242>
-  eImageInfo_CorrectedSynthesize = (1 << 4)
+  eImageInfo_CorrectedSynthesize = (1 << 4),
+  eImageInfo_ImageIsSimulated    = (1 << 5)
 };
 
 void CGObjCCommonMac::EmitImageInfo() {
@@ -3657,6 +3658,14 @@ void CGObjCCommonMac::EmitImageInfo() {
                         llvm::MDNode::get(VMContext, Ops));
     }
   }
+
+  // Indicate whether we're compiling this to run on a simulator.
+  const llvm::Triple &Triple = CGM.getTarget().getTriple();
+  if (Triple.getOS() == llvm::Triple::IOS &&
+      (Triple.getArch() == llvm::Triple::x86 ||
+       Triple.getArch() == llvm::Triple::x86_64))
+    Mod.addModuleFlag(llvm::Module::Error, "Objective-C Is Simulated",
+                      eImageInfo_ImageIsSimulated);
 }
 
 // struct objc_module {
@@ -3809,7 +3818,10 @@ void CGObjCCommonMac::BuildAggrIvarRecordLayout(const RecordType *RT,
                                                 bool &HasUnion) {
   const RecordDecl *RD = RT->getDecl();
   // FIXME - Use iterator.
-  SmallVector<const FieldDecl*, 16> Fields(RD->field_begin(), RD->field_end());
+  SmallVector<const FieldDecl*, 16> Fields;
+  for (RecordDecl::field_iterator i = RD->field_begin(),
+                                  e = RD->field_end(); i != e; ++i)
+    Fields.push_back(&*i);
   llvm::Type *Ty = CGM.getTypes().ConvertType(QualType(RT, 0));
   const llvm::StructLayout *RecLayout =
     CGM.getTargetData().getStructLayout(cast<llvm::StructType>(Ty));
@@ -4992,7 +5004,7 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
     }
     for (ObjCImplementationDecl::propimpl_iterator
            i = ID->propimpl_begin(), e = ID->propimpl_end(); i != e; ++i) {
-      ObjCPropertyImplDecl *PID = *i;
+      ObjCPropertyImplDecl *PID = &*i;
 
       if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize){
         ObjCPropertyDecl *PD = PID->getPropertyDecl();

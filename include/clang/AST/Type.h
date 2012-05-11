@@ -29,6 +29,7 @@
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/PointerUnion.h"
+#include "llvm/ADT/Twine.h"
 #include "clang/Basic/LLVM.h"
 
 namespace clang {
@@ -79,6 +80,7 @@ namespace clang {
   class CXXRecordDecl;
   class EnumDecl;
   class FieldDecl;
+  class FunctionDecl;
   class ObjCInterfaceDecl;
   class ObjCProtocolDecl;
   class ObjCMethodDecl;
@@ -411,12 +413,11 @@ public:
   }
 
   std::string getAsString() const;
-  std::string getAsString(const PrintingPolicy &Policy) const {
-    std::string Buffer;
-    getAsStringInternal(Buffer, Policy);
-    return Buffer;
-  }
-  void getAsStringInternal(std::string &S, const PrintingPolicy &Policy) const;
+  std::string getAsString(const PrintingPolicy &Policy) const;
+
+  bool isEmptyWhenPrinted(const PrintingPolicy &Policy) const;
+  void print(raw_ostream &OS, const PrintingPolicy &Policy,
+             bool appendSpaceIfNonEmpty = false) const;
 
   void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddInteger(Mask);
@@ -633,6 +634,11 @@ public:
   /// \brief Determine whether this is a Plain Old Data (POD) type (C++ 3.9p10).
   bool isPODType(ASTContext &Context) const;
 
+  /// isCXX98PODType() - Return true if this is a POD type according to the
+  /// rules of the C++98 standard, regardless of the current compilation's
+  /// language.
+  bool isCXX98PODType(ASTContext &Context) const;
+
   /// isCXX11PODType() - Return true if this is a POD type according to the
   /// more relaxed rules of the C++11 standard, regardless of the current
   /// compilation's language.
@@ -823,11 +829,20 @@ public:
   }
   static std::string getAsString(const Type *ty, Qualifiers qs);
 
-  std::string getAsString(const PrintingPolicy &Policy) const {
-    std::string S;
-    getAsStringInternal(S, Policy);
-    return S;
+  std::string getAsString(const PrintingPolicy &Policy) const;
+
+  void print(raw_ostream &OS, const PrintingPolicy &Policy,
+             const Twine &PlaceHolder = Twine()) const {
+    print(split(), OS, Policy, PlaceHolder);
   }
+  static void print(SplitQualType split, raw_ostream &OS,
+                    const PrintingPolicy &policy, const Twine &PlaceHolder) {
+    return print(split.Ty, split.Quals, OS, policy, PlaceHolder);
+  }
+  static void print(const Type *ty, Qualifiers qs,
+                    raw_ostream &OS, const PrintingPolicy &policy,
+                    const Twine &PlaceHolder);
+
   void getAsStringInternal(std::string &Str,
                            const PrintingPolicy &Policy) const {
     return getAsStringInternal(split(), Str, Policy);
@@ -839,6 +854,27 @@ public:
   static void getAsStringInternal(const Type *ty, Qualifiers qs,
                                   std::string &out,
                                   const PrintingPolicy &policy);
+
+  class StreamedQualTypeHelper {
+    const QualType &T;
+    const PrintingPolicy &Policy;
+    const Twine &PlaceHolder;
+  public:
+    StreamedQualTypeHelper(const QualType &T, const PrintingPolicy &Policy,
+                           const Twine &PlaceHolder)
+      : T(T), Policy(Policy), PlaceHolder(PlaceHolder) { }
+
+    friend raw_ostream &operator<<(raw_ostream &OS,
+                                   const StreamedQualTypeHelper &SQT) {
+      SQT.T.print(OS, SQT.Policy, SQT.PlaceHolder);
+      return OS;
+    }
+  };
+
+  StreamedQualTypeHelper stream(const PrintingPolicy &Policy,
+                                const Twine &PlaceHolder = Twine()) const {
+    return StreamedQualTypeHelper(*this, Policy, PlaceHolder);
+  }
 
   void dump(const char *s) const;
   void dump() const;
@@ -1714,9 +1750,9 @@ public:
   friend class ASTWriter;
 };
 
-template <> inline const TypedefType *Type::getAs() const {
-  return dyn_cast<TypedefType>(this);
-}
+/// \brief This will check for a TypedefType by removing any existing sugar
+/// until it reaches a TypedefType or a non-sugared type.
+template <> const TypedefType *Type::getAs() const;
 
 // We can do canonical leaf types faster, because we don't have to
 // worry about preserving child type decoration.
@@ -1751,7 +1787,13 @@ public:
   }
 
   Kind getKind() const { return static_cast<Kind>(BuiltinTypeBits.Kind); }
-  const char *getName(const PrintingPolicy &Policy) const;
+  StringRef getName(const PrintingPolicy &Policy) const;
+  const char *getNameAsCString(const PrintingPolicy &Policy) const {
+    // The StringRef is null-terminated.
+    StringRef str = getName(Policy);
+    assert(!str.empty() && str.data()[str.size()] == '\0');
+    return str.data();
+  }
 
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
@@ -2700,7 +2742,9 @@ public:
     ExtProtoInfo() :
       Variadic(false), HasTrailingReturn(false), TypeQuals(0),
       ExceptionSpecType(EST_None), RefQualifier(RQ_None),
-      NumExceptions(0), Exceptions(0), NoexceptExpr(0), ConsumedArguments(0) {}
+      NumExceptions(0), Exceptions(0), NoexceptExpr(0),
+      ExceptionSpecDecl(0), ExceptionSpecTemplate(0),
+      ConsumedArguments(0) {}
 
     FunctionType::ExtInfo ExtInfo;
     bool Variadic : 1;
@@ -2711,6 +2755,8 @@ public:
     unsigned NumExceptions;
     const QualType *Exceptions;
     Expr *NoexceptExpr;
+    FunctionDecl *ExceptionSpecDecl;
+    FunctionDecl *ExceptionSpecTemplate;
     const bool *ConsumedArguments;
   };
 
@@ -2756,6 +2802,11 @@ private:
   // NoexceptExpr - Instead of Exceptions, there may be a single Expr* pointing
   // to the expression in the noexcept() specifier.
 
+  // ExceptionSpecDecl, ExceptionSpecTemplate - Instead of Exceptions, there may
+  // be a pair of FunctionDecl* pointing to the function which should be used to
+  // instantiate this function type's exception specification, and the function
+  // from which it should be instantiated.
+
   // ConsumedArgs - A variable size array, following Exceptions
   // and of length NumArgs, holding flags indicating which arguments
   // are consumed.  This only appears if HasAnyConsumedArgs is true.
@@ -2795,6 +2846,9 @@ public:
       EPI.Exceptions = exception_begin();
     } else if (EPI.ExceptionSpecType == EST_ComputedNoexcept) {
       EPI.NoexceptExpr = getNoexceptExpr();
+    } else if (EPI.ExceptionSpecType == EST_Uninstantiated) {
+      EPI.ExceptionSpecDecl = getExceptionSpecDecl();
+      EPI.ExceptionSpecTemplate = getExceptionSpecTemplate();
     }
     if (hasAnyConsumedArgs())
       EPI.ConsumedArguments = getConsumedArgsBuffer();
@@ -2838,9 +2892,26 @@ public:
     // NoexceptExpr sits where the arguments end.
     return *reinterpret_cast<Expr *const *>(arg_type_end());
   }
+  /// \brief If this function type has an uninstantiated exception
+  /// specification, this is the function whose exception specification
+  /// is represented by this type.
+  FunctionDecl *getExceptionSpecDecl() const {
+    if (getExceptionSpecType() != EST_Uninstantiated)
+      return 0;
+    return reinterpret_cast<FunctionDecl * const *>(arg_type_end())[0];
+  }
+  /// \brief If this function type has an uninstantiated exception
+  /// specification, this is the function whose exception specification
+  /// should be instantiated to find the exception specification for
+  /// this type.
+  FunctionDecl *getExceptionSpecTemplate() const {
+    if (getExceptionSpecType() != EST_Uninstantiated)
+      return 0;
+    return reinterpret_cast<FunctionDecl * const *>(arg_type_end())[1];
+  }
   bool isNothrow(ASTContext &Ctx) const {
     ExceptionSpecificationType EST = getExceptionSpecType();
-    assert(EST != EST_Delayed);
+    assert(EST != EST_Delayed && EST != EST_Uninstantiated);
     if (EST == EST_DynamicNone || EST == EST_BasicNoexcept)
       return true;
     if (EST != EST_ComputedNoexcept)
@@ -2898,7 +2969,10 @@ public:
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
 
+  // FIXME: Remove the string version.
   void printExceptionSpecification(std::string &S, 
+                                   PrintingPolicy Policy) const;
+  void printExceptionSpecification(raw_ostream &OS, 
                                    PrintingPolicy Policy) const;
 
   static bool classof(const Type *T) {
@@ -3552,6 +3626,7 @@ public:
 
   /// \brief Print a template argument list, including the '<' and '>'
   /// enclosing the template arguments.
+  // FIXME: remove the string ones.
   static std::string PrintTemplateArgumentList(const TemplateArgument *Args,
                                                unsigned NumArgs,
                                                const PrintingPolicy &Policy,
@@ -3563,6 +3638,23 @@ public:
 
   static std::string PrintTemplateArgumentList(const TemplateArgumentListInfo &,
                                                const PrintingPolicy &Policy);
+
+  /// \brief Print a template argument list, including the '<' and '>'
+  /// enclosing the template arguments.
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgument *Args,
+                                        unsigned NumArgs,
+                                        const PrintingPolicy &Policy,
+                                        bool SkipBrackets = false);
+
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgumentLoc *Args,
+                                        unsigned NumArgs,
+                                        const PrintingPolicy &Policy);
+
+  static void PrintTemplateArgumentList(raw_ostream &OS,
+                                        const TemplateArgumentListInfo &,
+                                        const PrintingPolicy &Policy);
 
   /// True if this template specialization type matches a current
   /// instantiation in the context in which it is found.

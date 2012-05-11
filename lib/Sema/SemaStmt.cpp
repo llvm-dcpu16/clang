@@ -19,6 +19,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
 #include "clang/AST/StmtObjC.h"
@@ -28,6 +29,7 @@
 #include "clang/Basic/TargetInfo.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 using namespace clang;
 using namespace sema;
@@ -345,7 +347,6 @@ Sema::ActOnDefaultStmt(SourceLocation DefaultLoc, SourceLocation ColonLoc,
 StmtResult
 Sema::ActOnLabelStmt(SourceLocation IdentLoc, LabelDecl *TheDecl,
                      SourceLocation ColonLoc, Stmt *SubStmt) {
-  
   // If the label was multiply defined, reject it now.
   if (TheDecl->getStmt()) {
     Diag(IdentLoc, diag::err_redefinition_of_label) << TheDecl->getDeclName();
@@ -358,6 +359,16 @@ Sema::ActOnLabelStmt(SourceLocation IdentLoc, LabelDecl *TheDecl,
   TheDecl->setStmt(LS);
   if (!TheDecl->isGnuLocal())
     TheDecl->setLocation(IdentLoc);
+  return Owned(LS);
+}
+
+StmtResult Sema::ActOnAttributedStmt(SourceLocation AttrLoc,
+                                     const AttrVec &Attrs,
+                                     Stmt *SubStmt) {
+  // Fill in the declaration and return it. Variable length will require to
+  // change this to AttributedStmt::Create(Context, ....);
+  // and probably using ArrayRef
+  AttributedStmt *LS = new (Context) AttributedStmt(AttrLoc, Attrs, SubStmt);
   return Owned(LS);
 }
 
@@ -510,16 +521,56 @@ Sema::ActOnStartOfSwitchStmt(SourceLocation SwitchLoc, Expr *Cond,
   if (!Cond)
     return StmtError();
 
+  class SwitchConvertDiagnoser : public ICEConvertDiagnoser {
+    Expr *Cond;
+    
+  public:
+    SwitchConvertDiagnoser(Expr *Cond)
+      : ICEConvertDiagnoser(false, true), Cond(Cond) { }
+    
+    virtual DiagnosticBuilder diagnoseNotInt(Sema &S, SourceLocation Loc,
+                                             QualType T) {
+      return S.Diag(Loc, diag::err_typecheck_statement_requires_integer) << T;
+    }
+    
+    virtual DiagnosticBuilder diagnoseIncomplete(Sema &S, SourceLocation Loc,
+                                                 QualType T) {
+      return S.Diag(Loc, diag::err_switch_incomplete_class_type)
+               << T << Cond->getSourceRange();
+    }
+    
+    virtual DiagnosticBuilder diagnoseExplicitConv(Sema &S, SourceLocation Loc,
+                                                   QualType T,
+                                                   QualType ConvTy) {
+      return S.Diag(Loc, diag::err_switch_explicit_conversion) << T << ConvTy;
+    }
+    
+    virtual DiagnosticBuilder noteExplicitConv(Sema &S, CXXConversionDecl *Conv,
+                                               QualType ConvTy) {
+      return S.Diag(Conv->getLocation(), diag::note_switch_conversion)
+        << ConvTy->isEnumeralType() << ConvTy;
+    }
+    
+    virtual DiagnosticBuilder diagnoseAmbiguous(Sema &S, SourceLocation Loc,
+                                                QualType T) {
+      return S.Diag(Loc, diag::err_switch_multiple_conversions) << T;
+    }
+    
+    virtual DiagnosticBuilder noteAmbiguous(Sema &S, CXXConversionDecl *Conv,
+                                            QualType ConvTy) {
+      return S.Diag(Conv->getLocation(), diag::note_switch_conversion)
+      << ConvTy->isEnumeralType() << ConvTy;
+    }
+    
+    virtual DiagnosticBuilder diagnoseConversion(Sema &S, SourceLocation Loc,
+                                                 QualType T,
+                                                 QualType ConvTy) {
+      return DiagnosticBuilder::getEmpty();
+    }
+  } SwitchDiagnoser(Cond);
+
   CondResult
-    = ConvertToIntegralOrEnumerationType(SwitchLoc, Cond,
-                          PDiag(diag::err_typecheck_statement_requires_integer),
-                                   PDiag(diag::err_switch_incomplete_class_type)
-                                     << Cond->getSourceRange(),
-                                   PDiag(diag::err_switch_explicit_conversion),
-                                         PDiag(diag::note_switch_conversion),
-                                   PDiag(diag::err_switch_multiple_conversions),
-                                         PDiag(diag::note_switch_conversion),
-                                         PDiag(0),
+    = ConvertToIntegralOrEnumerationType(SwitchLoc, Cond, SwitchDiagnoser,
                                          /*AllowScopedEnumerations*/ true);
   if (CondResult.isInvalid()) return StmtError();
   Cond = CondResult.take();
@@ -867,7 +918,7 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
            EDI != ED->enumerator_end(); ++EDI) {
         llvm::APSInt Val = EDI->getInitVal();
         AdjustAPSInt(Val, CondWidth, CondIsSigned);
-        EnumVals.push_back(std::make_pair(Val, *EDI));
+        EnumVals.push_back(std::make_pair(Val, &*EDI));
       }
       std::stable_sort(EnumVals.begin(), EnumVals.end(), CmpEnumVals);
       EnumValsTy::iterator EIend =
@@ -1028,6 +1079,219 @@ Sema::ActOnDoStmt(SourceLocation DoLoc, Stmt *Body,
   return Owned(new (Context) DoStmt(Body, Cond, DoLoc, WhileLoc, CondRParen));
 }
 
+namespace {
+  // This visitor will traverse a conditional statement and store all
+  // the evaluated decls into a vector.  Simple is set to true if none
+  // of the excluded constructs are used.
+  class DeclExtractor : public EvaluatedExprVisitor<DeclExtractor> {
+    llvm::SmallPtrSet<VarDecl*, 8> &Decls;
+    llvm::SmallVector<SourceRange, 10> &Ranges;
+    bool Simple;
+    PartialDiagnostic &PDiag;
+public:
+  typedef EvaluatedExprVisitor<DeclExtractor> Inherited;
+
+  DeclExtractor(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls,
+                llvm::SmallVector<SourceRange, 10> &Ranges,
+                PartialDiagnostic &PDiag) :
+      Inherited(S.Context),
+      Decls(Decls),
+      Ranges(Ranges),
+      Simple(true),
+      PDiag(PDiag) {}
+
+  bool isSimple() { return Simple; }
+
+  // Replaces the method in EvaluatedExprVisitor.
+  void VisitMemberExpr(MemberExpr* E) {
+    Simple = false;
+  }
+
+  // Any Stmt not whitelisted will cause the condition to be marked complex.
+  void VisitStmt(Stmt *S) {
+    Simple = false;
+  }
+
+  void VisitBinaryOperator(BinaryOperator *E) {
+    Visit(E->getLHS());
+    Visit(E->getRHS());
+  }
+
+  void VisitCastExpr(CastExpr *E) {
+    Visit(E->getSubExpr());
+  }
+
+  void VisitUnaryOperator(UnaryOperator *E) {
+    // Skip checking conditionals with derefernces.
+    if (E->getOpcode() == UO_Deref)
+      Simple = false;
+    else
+      Visit(E->getSubExpr());
+  }
+
+  void VisitConditionalOperator(ConditionalOperator *E) {
+    Visit(E->getCond());
+    Visit(E->getTrueExpr());
+    Visit(E->getFalseExpr());
+  }
+
+  void VisitParenExpr(ParenExpr *E) {
+    Visit(E->getSubExpr());
+  }
+
+  void VisitBinaryConditionalOperator(BinaryConditionalOperator *E) {
+    Visit(E->getOpaqueValue()->getSourceExpr());
+    Visit(E->getFalseExpr());
+  }
+
+  void VisitIntegerLiteral(IntegerLiteral *E) { }
+  void VisitFloatingLiteral(FloatingLiteral *E) { }
+  void VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *E) { }
+  void VisitCharacterLiteral(CharacterLiteral *E) { }
+  void VisitGNUNullExpr(GNUNullExpr *E) { }
+  void VisitImaginaryLiteral(ImaginaryLiteral *E) { }
+
+  void VisitDeclRefExpr(DeclRefExpr *E) {
+    VarDecl *VD = dyn_cast<VarDecl>(E->getDecl());
+    if (!VD) return;
+
+    Ranges.push_back(E->getSourceRange());
+
+    Decls.insert(VD);
+  }
+
+  }; // end class DeclExtractor
+
+  // DeclMatcher checks to see if the decls are used in a non-evauluated
+  // context.  
+  class DeclMatcher : public EvaluatedExprVisitor<DeclMatcher> {
+    llvm::SmallPtrSet<VarDecl*, 8> &Decls;
+    bool FoundDecl;
+    //bool EvalDecl;
+
+public:
+  typedef EvaluatedExprVisitor<DeclMatcher> Inherited;
+
+  DeclMatcher(Sema &S, llvm::SmallPtrSet<VarDecl*, 8> &Decls, Stmt *Statement) :
+      Inherited(S.Context), Decls(Decls), FoundDecl(false) {
+    if (!Statement) return;
+
+    Visit(Statement);
+  }
+
+  void VisitReturnStmt(ReturnStmt *S) {
+    FoundDecl = true;
+  }
+
+  void VisitBreakStmt(BreakStmt *S) {
+    FoundDecl = true;
+  }
+
+  void VisitGotoStmt(GotoStmt *S) {
+    FoundDecl = true;
+  }
+
+  void VisitCastExpr(CastExpr *E) {
+    if (E->getCastKind() == CK_LValueToRValue)
+      CheckLValueToRValueCast(E->getSubExpr());
+    else
+      Visit(E->getSubExpr());
+  }
+
+  void CheckLValueToRValueCast(Expr *E) {
+    E = E->IgnoreParenImpCasts();
+
+    if (isa<DeclRefExpr>(E)) {
+      return;
+    }
+
+    if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E)) {
+      Visit(CO->getCond());
+      CheckLValueToRValueCast(CO->getTrueExpr());
+      CheckLValueToRValueCast(CO->getFalseExpr());
+      return;
+    }
+
+    if (BinaryConditionalOperator *BCO =
+            dyn_cast<BinaryConditionalOperator>(E)) {
+      CheckLValueToRValueCast(BCO->getOpaqueValue()->getSourceExpr());
+      CheckLValueToRValueCast(BCO->getFalseExpr());
+      return;
+    }
+
+    Visit(E);
+  }
+
+  void VisitDeclRefExpr(DeclRefExpr *E) {
+    if (VarDecl *VD = dyn_cast<VarDecl>(E->getDecl()))
+      if (Decls.count(VD))
+        FoundDecl = true;
+  }
+
+  bool FoundDeclInUse() { return FoundDecl; }
+
+  };  // end class DeclMatcher
+
+  void CheckForLoopConditionalStatement(Sema &S, Expr *Second,
+                                        Expr *Third, Stmt *Body) {
+    // Condition is empty
+    if (!Second) return;
+
+    if (S.Diags.getDiagnosticLevel(diag::warn_variables_not_in_loop_body,
+                                   Second->getLocStart())
+        == DiagnosticsEngine::Ignored)
+      return;
+
+    PartialDiagnostic PDiag = S.PDiag(diag::warn_variables_not_in_loop_body);
+    llvm::SmallPtrSet<VarDecl*, 8> Decls;
+    llvm::SmallVector<SourceRange, 10> Ranges;
+    DeclExtractor DE(S, Decls, Ranges, PDiag);
+    DE.Visit(Second);
+
+    // Don't analyze complex conditionals.
+    if (!DE.isSimple()) return;
+
+    // No decls found.
+    if (Decls.size() == 0) return;
+
+    // Don't warn on volatile, static, or global variables.
+    for (llvm::SmallPtrSet<VarDecl*, 8>::iterator I = Decls.begin(),
+                                                  E = Decls.end();
+         I != E; ++I)
+      if ((*I)->getType().isVolatileQualified() ||
+          (*I)->hasGlobalStorage()) return;
+
+    if (DeclMatcher(S, Decls, Second).FoundDeclInUse() ||
+        DeclMatcher(S, Decls, Third).FoundDeclInUse() ||
+        DeclMatcher(S, Decls, Body).FoundDeclInUse())
+      return;
+
+    // Load decl names into diagnostic.
+    if (Decls.size() > 4)
+      PDiag << 0;
+    else {
+      PDiag << Decls.size();
+      for (llvm::SmallPtrSet<VarDecl*, 8>::iterator I = Decls.begin(),
+                                                    E = Decls.end();
+           I != E; ++I)
+        PDiag << (*I)->getDeclName();
+    }
+
+    // Load SourceRanges into diagnostic if there is room.
+    // Otherwise, load the SourceRange of the conditional expression.
+    if (Ranges.size() <= PartialDiagnostic::MaxArguments)
+      for (llvm::SmallVector<SourceRange, 10>::iterator I = Ranges.begin(),
+                                                        E = Ranges.end();
+           I != E; ++I)
+        PDiag << *I;
+    else
+      PDiag << Second->getSourceRange();
+
+    S.Diag(Ranges.begin()->getBegin(), PDiag);
+  }
+
+} // end namespace
+
 StmtResult
 Sema::ActOnForStmt(SourceLocation ForLoc, SourceLocation LParenLoc,
                    Stmt *First, FullExprArg second, Decl *secondVar,
@@ -1049,6 +1313,8 @@ Sema::ActOnForStmt(SourceLocation ForLoc, SourceLocation LParenLoc,
       }
     }
   }
+
+  CheckForLoopConditionalStatement(*this, second.get(), third.get(), Body);
 
   ExprResult SecondResult(second.release());
   VarDecl *ConditionVar = 0;
@@ -1124,9 +1390,9 @@ Sema::ActOnObjCForCollectionOperand(SourceLocation forLoc, Expr *collection) {
   if (iface && 
       RequireCompleteType(forLoc, QualType(objectType, 0),
                           getLangOpts().ObjCAutoRefCount
-                            ? PDiag(diag::err_arc_collection_forward)
-                                << collection->getSourceRange()
-                          : PDiag(0))) {
+                            ? diag::err_arc_collection_forward
+                            : 0,
+                          collection)) {
     // Otherwise, if we have any useful type information, check that
     // the type declares the appropriate method.
   } else if (iface || !objectType->qual_empty()) {
@@ -1433,7 +1699,7 @@ Sema::BuildCXXForRangeStmt(SourceLocation ForLoc, SourceLocation ColonLoc,
     QualType RangeType = Range->getType();
 
     if (RequireCompleteType(RangeLoc, RangeType,
-                            PDiag(diag::err_for_range_incomplete_type)))
+                            diag::err_for_range_incomplete_type))
       return StmtError();
 
     // Build auto __begin = begin-expr, __end = end-expr.
@@ -2411,15 +2677,13 @@ Sema::ActOnObjCAtTryStmt(SourceLocation AtLoc, Stmt *Try,
                                      Finally));
 }
 
-StmtResult Sema::BuildObjCAtThrowStmt(SourceLocation AtLoc,
-                                                  Expr *Throw) {
+StmtResult Sema::BuildObjCAtThrowStmt(SourceLocation AtLoc, Expr *Throw) {
   if (Throw) {
-    Throw = MaybeCreateExprWithCleanups(Throw);
     ExprResult Result = DefaultLvalueConversion(Throw);
     if (Result.isInvalid())
       return StmtError();
 
-    Throw = Result.take();
+    Throw = MaybeCreateExprWithCleanups(Result.take());
     QualType ThrowType = Throw->getType();
     // Make sure the expression type is an ObjC pointer or "void *".
     if (!ThrowType->isDependentType() &&

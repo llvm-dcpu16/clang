@@ -225,7 +225,9 @@ public:
   
   /// \brief Create the initialization entity for a temporary.
   static InitializedEntity InitializeTemporary(QualType Type) {
-    return InitializedEntity(EK_Temporary, SourceLocation(), Type);
+    InitializedEntity Result(EK_Temporary, SourceLocation(), Type);
+    Result.TypeInfo = 0;
+    return Result;
   }
 
   /// \brief Create the initialization entity for a temporary.
@@ -340,7 +342,7 @@ public:
   /// element, sets the element index.
   void setElementIndex(unsigned Index) {
     assert(getKind() == EK_ArrayElement || getKind() == EK_VectorElement ||
-           EK_ComplexElement);
+           getKind() == EK_ComplexElement);
     this->Index = Index;
   }
 
@@ -734,6 +736,9 @@ private:
   /// \brief The candidate set created when initialization failed.
   OverloadCandidateSet FailedCandidateSet;
 
+  /// \brief The incomplete type that caused a failure.
+  QualType FailedIncompleteType;
+  
   /// \brief Prints a follow-up note that highlights the location of
   /// the initialized entity, if it's remote.
   void PrintInitLocationNote(Sema &S, const InitializedEntity &Entity);
@@ -949,6 +954,8 @@ public:
   void SetFailed(FailureKind Failure) {
     SequenceKind = FailedSequence;
     this->Failure = Failure;
+    assert((Failure != FK_Incomplete || !FailedIncompleteType.isNull()) &&
+           "Incomplete type failure requires a type!");
   }
   
   /// \brief Note that this initialization sequence failed due to failed
@@ -965,6 +972,13 @@ public:
   /// sequence failed due to a bad overload.
   OverloadingResult getFailedOverloadResult() const {
     return FailedOverloadResult;
+  }
+
+  /// \brief Note that this initialization sequence failed due to an
+  /// incomplete type.
+  void setIncompleteTypeFailure(QualType IncompleteType) {
+    FailedIncompleteType = IncompleteType;
+    SetFailed(FK_Incomplete);
   }
 
   /// \brief Determine why initialization failed.

@@ -344,7 +344,6 @@ void f0() {
   tmp_V16c = __builtin_ia32_lddqu(tmp_cCp);
   tmp_V2LLi = __builtin_ia32_palignr128(tmp_V2LLi, tmp_V2LLi, imm_i);
   tmp_V1LLi = __builtin_ia32_palignr(tmp_V1LLi, tmp_V1LLi, imm_i);
-  (void) __builtin_ia32_storelv4si(tmp_V2ip, tmp_V2LLi);
 #ifdef USE_SSE4
   tmp_V16c = __builtin_ia32_pblendvb128(tmp_V16c, tmp_V16c, tmp_V16c);
   tmp_V8s = __builtin_ia32_pblendw128(tmp_V8s, tmp_V8s, imm_i_0_256);
@@ -414,6 +413,9 @@ void f0() {
   tmp_V4i = __builtin_ia32_cvttpd2dq256(tmp_V4d);
   tmp_V4i = __builtin_ia32_cvtpd2dq256(tmp_V4d);
   tmp_V8i = __builtin_ia32_cvttps2dq256(tmp_V8f);
+  tmp_V4d = __builtin_ia32_vperm2f128_pd256(tmp_V4d, tmp_V4d, 0x7);
+  tmp_V8f = __builtin_ia32_vperm2f128_ps256(tmp_V8f, tmp_V8f, 0x7);
+  tmp_V8i = __builtin_ia32_vperm2f128_si256(tmp_V8i, tmp_V8i, 0x7);
   tmp_V4d = __builtin_ia32_vinsertf128_pd256(tmp_V4d, tmp_V2d, 0x7);
   tmp_V8f = __builtin_ia32_vinsertf128_ps256(tmp_V8f, tmp_V4f, 0x7);
   tmp_V8i = __builtin_ia32_vinsertf128_si256(tmp_V8i, tmp_V4i, 0x7);

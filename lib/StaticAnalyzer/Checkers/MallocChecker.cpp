@@ -137,6 +137,9 @@ public:
     return true;
   }
 
+  void printState(raw_ostream &Out, ProgramStateRef State,
+                  const char *NL, const char *Sep) const;
+
 private:
   void initIdentifierInfo(ASTContext &C) const;
 
@@ -207,15 +210,17 @@ private:
     // The allocated region symbol tracked by the main analysis.
     SymbolRef Sym;
 
-     // The mode we are in, i.e. what kind of diagnostics will be emitted.
-     NotificationMode Mode;
+    // The mode we are in, i.e. what kind of diagnostics will be emitted.
+    NotificationMode Mode;
 
-     // A symbol from when the primary region should have been reallocated.
-     SymbolRef FailedReallocSymbol;
+    // A symbol from when the primary region should have been reallocated.
+    SymbolRef FailedReallocSymbol;
 
-   public:
-     MallocBugVisitor(SymbolRef S)
-       : Sym(S), Mode(Normal), FailedReallocSymbol(0) {}
+    bool IsLeak;
+
+  public:
+    MallocBugVisitor(SymbolRef S, bool isLeak = false)
+       : Sym(S), Mode(Normal), FailedReallocSymbol(0), IsLeak(isLeak) {}
 
     virtual ~MallocBugVisitor() {}
 
@@ -253,6 +258,20 @@ private:
                                    const ExplodedNode *PrevN,
                                    BugReporterContext &BRC,
                                    BugReport &BR);
+
+    PathDiagnosticPiece* getEndPath(BugReporterContext &BRC,
+                                    const ExplodedNode *EndPathNode,
+                                    BugReport &BR) {
+      if (!IsLeak)
+        return 0;
+
+      PathDiagnosticLocation L =
+        PathDiagnosticLocation::createEndOfPath(EndPathNode,
+                                                BRC.getSourceManager());
+      // Do not add the statement itself as a range in case of leak.
+      return new PathDiagnosticEventPiece(L, BR.getDescription(), false);
+    }
+
   private:
     class StackHintGeneratorForReallocationFailed
         : public StackHintGeneratorForSymbol {
@@ -368,6 +387,8 @@ void MallocChecker::checkPostStmt(const CallExpr *CE, CheckerContext &C) const {
 
   ProgramStateRef State = C.getState();
   if (FunI == II_malloc || FunI == II_valloc) {
+    if (CE->getNumArgs() < 1)
+      return;
     State = MallocMemAux(C, CE, CE->getArg(0), UndefinedVal(), State);
   } else if (FunI == II_realloc) {
     State = ReallocMem(C, CE, false);
@@ -490,6 +511,9 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
                                           ProgramStateRef state,
                                           unsigned Num,
                                           bool Hold) const {
+  if (CE->getNumArgs() < (Num + 1))
+    return 0;
+
   const Expr *ArgExpr = CE->getArg(Num);
   SVal ArgVal = state->getSVal(ArgExpr, C.getLocationContext());
   if (!isa<DefinedOrUnknownSVal>(ArgVal))
@@ -710,6 +734,9 @@ void MallocChecker::ReportBadFree(CheckerContext &C, SVal ArgVal,
 ProgramStateRef MallocChecker::ReallocMem(CheckerContext &C,
                                           const CallExpr *CE,
                                           bool FreesOnFail) const {
+  if (CE->getNumArgs() < 2)
+    return 0;
+
   ProgramStateRef state = C.getState();
   const Expr *arg0Expr = CE->getArg(0);
   const LocationContext *LCtx = C.getLocationContext();
@@ -795,6 +822,9 @@ ProgramStateRef MallocChecker::ReallocMem(CheckerContext &C,
 }
 
 ProgramStateRef MallocChecker::CallocMem(CheckerContext &C, const CallExpr *CE){
+  if (CE->getNumArgs() < 2)
+    return 0;
+
   ProgramStateRef state = C.getState();
   SValBuilder &svalBuilder = C.getSValBuilder();
   const LocationContext *LCtx = C.getLocationContext();
@@ -881,7 +911,7 @@ void MallocChecker::reportLeak(SymbolRef Sym, ExplodedNode *N,
 
   BugReport *R = new BugReport(*BT_Leak, os.str(), N, LocUsedForUniqueing);
   R->markInteresting(Sym);
-  R->addVisitor(new MallocBugVisitor(Sym));
+  R->addVisitor(new MallocBugVisitor(Sym, true));
   C.EmitReport(R);
 }
 
@@ -1107,7 +1137,11 @@ void MallocChecker::checkBind(SVal loc, SVal val, const Stmt *S,
       // To test (3), generate a new state with the binding added.  If it is
       // the same state, then it escapes (since the store cannot represent
       // the binding).
-      escapes = (state == (state->bindLoc(*regionLoc, val)));
+      // Do this only if we know that the store is not supposed to generate the
+      // same state.
+      SVal StoredVal = state->getSVal(regionLoc->getRegion());
+      if (StoredVal != val)
+        escapes = (state == (state->bindLoc(*regionLoc, val)));
     }
     if (!escapes) {
       // Case 4: We do not currently model what happens when a symbol is
@@ -1267,6 +1301,11 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
     if (FName.startswith("NS") && (FName.find("Insert") != StringRef::npos))
       return false;
 
+    // If the call has a callback as an argument, assume the memory
+    // can be freed.
+    if (Call->hasNonZeroCallbackArg())
+      return false;
+
     // Otherwise, assume that the function does not free memory.
     // Most system calls, do not free the memory.
     return true;
@@ -1293,6 +1332,11 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
     if (S.getNameForSlot(0).endswith("NoCopy")) {
       return false;
     }
+
+    // If the call has a callback as an argument, assume the memory
+    // can be freed.
+    if (Call->hasNonZeroCallbackArg())
+      return false;
 
     // Otherwise, assume that the function does not free memory.
     // Most system calls, do not free the memory.
@@ -1441,6 +1485,14 @@ MallocChecker::MallocBugVisitor::VisitNode(const ExplodedNode *N,
   return new PathDiagnosticEventPiece(Pos, Msg, true, StackHint);
 }
 
+void MallocChecker::printState(raw_ostream &Out, ProgramStateRef State,
+                               const char *NL, const char *Sep) const {
+
+  RegionStateTy RS = State->get<RegionState>();
+
+  if (!RS.isEmpty())
+    Out << "Has Malloc data" << NL;
+}
 
 #define REGISTER_CHECKER(name) \
 void ento::register##name(CheckerManager &mgr) {\

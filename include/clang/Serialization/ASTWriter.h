@@ -76,6 +76,7 @@ public:
   typedef SmallVectorImpl<uint64_t> RecordDataImpl;
 
   friend class ASTDeclWriter;
+  friend class ASTStmtWriter;
 private:
   /// \brief Map that provides the ID numbers of each type within the
   /// output stream, plus those deserialized from a chained PCH.
@@ -336,7 +337,7 @@ private:
   SmallVector<Stmt *, 16> *CollectedStmts;
 
   /// \brief Mapping from SwitchCase statements to IDs.
-  std::map<SwitchCase *, unsigned> SwitchCaseIDs;
+  llvm::DenseMap<SwitchCase *, unsigned> SwitchCaseIDs;
 
   /// \brief The number of statements written to the AST file.
   unsigned NumStatements;

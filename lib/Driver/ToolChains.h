@@ -205,6 +205,10 @@ private:
   /// initialized.
   std::string MacosxVersionMin;
 
+  /// The default ios-version-min of this tool chain; empty until
+  /// initialized.
+  std::string iOSVersionMin;
+
   bool hasARCRuntime() const;
   bool hasSubscriptingRuntime() const;
 
@@ -279,14 +283,6 @@ public:
     return TargetVersion < VersionTuple(V0, V1, V2);
   }
 
-  /// AddLinkSearchPathArgs - Add the linker search paths to \arg CmdArgs.
-  ///
-  /// \param Args - The input argument list.
-  /// \param CmdArgs [out] - The command argument list to append the paths
-  /// (prefixed by -L) to.
-  virtual void AddLinkSearchPathArgs(const ArgList &Args,
-                                     ArgStringList &CmdArgs) const = 0;
-
   /// AddLinkARCArgs - Add the linker arguments to link the ARC runtime library.
   virtual void AddLinkARCArgs(const ArgList &Args,
                               ArgStringList &CmdArgs) const = 0;
@@ -333,7 +329,11 @@ public:
     return ToolChain::IsStrictAliasingDefault();
 #endif
   }
-  
+
+  virtual bool IsMathErrnoDefault() const {
+    return false;
+  }
+
   virtual bool IsObjCDefaultSynthPropertiesDefault() const {
     return true;
   }
@@ -391,9 +391,6 @@ public:
 
   /// @name Darwin ToolChain Implementation
   /// {
-
-  virtual void AddLinkSearchPathArgs(const ArgList &Args,
-                                    ArgStringList &CmdArgs) const;
 
   virtual void AddLinkRuntimeLibArgs(const ArgList &Args,
                                      ArgStringList &CmdArgs) const;
@@ -459,6 +456,17 @@ class LLVM_LIBRARY_VISIBILITY OpenBSD : public Generic_ELF {
 public:
   OpenBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
+  virtual bool IsMathErrnoDefault() const { return false; }
+  virtual bool IsObjCNonFragileABIDefault() const { return true; }
+  virtual bool IsObjCLegacyDispatchDefault() const {
+    llvm::Triple::ArchType Arch = getTriple().getArch();
+    if (Arch == llvm::Triple::arm ||
+        Arch == llvm::Triple::x86 ||
+        Arch == llvm::Triple::x86_64)
+     return false;
+    return true;
+  }
+
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
 };
@@ -467,6 +475,17 @@ class LLVM_LIBRARY_VISIBILITY FreeBSD : public Generic_ELF {
 public:
   FreeBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
 
+  virtual bool IsMathErrnoDefault() const { return false; }
+  virtual bool IsObjCNonFragileABIDefault() const { return true; }
+  virtual bool IsObjCLegacyDispatchDefault() const {
+    llvm::Triple::ArchType Arch = getTriple().getArch();
+    if (Arch == llvm::Triple::arm ||
+        Arch == llvm::Triple::x86 ||
+        Arch == llvm::Triple::x86_64)
+     return false;
+    return true;
+  }
+
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
 };
@@ -474,6 +493,17 @@ public:
 class LLVM_LIBRARY_VISIBILITY NetBSD : public Generic_ELF {
 public:
   NetBSD(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
+
+  virtual bool IsMathErrnoDefault() const { return false; }
+  virtual bool IsObjCNonFragileABIDefault() const { return true; }
+  virtual bool IsObjCLegacyDispatchDefault() const {
+    llvm::Triple::ArchType Arch = getTriple().getArch();
+    if (Arch == llvm::Triple::arm ||
+        Arch == llvm::Triple::x86 ||
+        Arch == llvm::Triple::x86_64)
+     return false;
+    return true;
+  }
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;
@@ -490,6 +520,8 @@ public:
 class LLVM_LIBRARY_VISIBILITY DragonFly : public Generic_ELF {
 public:
   DragonFly(const Driver &D, const llvm::Triple& Triple, const ArgList &Args);
+
+  virtual bool IsMathErrnoDefault() const { return false; }
 
   virtual Tool &SelectTool(const Compilation &C, const JobAction &JA,
                            const ActionList &Inputs) const;

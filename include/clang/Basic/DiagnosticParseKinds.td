@@ -311,7 +311,7 @@ def err_templated_using_directive : Error<
 def err_templated_using_declaration : Error<
   "cannot template a using declaration">;
 def err_unexected_colon_in_nested_name_spec : Error<
-  "unexpected ':' in nested name specifier">;
+  "unexpected ':' in nested name specifier; did you mean '::'?">;
 def err_bool_redeclaration : Error<
   "redeclaration of C++ built-in type 'bool'">;
 def ext_c11_static_assert : Extension<
@@ -396,6 +396,8 @@ def err_expected_init_in_condition : Error<
   "variable declaration in condition must have an initializer">;
 def err_expected_init_in_condition_lparen : Error<
   "variable declaration in condition cannot have a parenthesized initializer">;
+def err_extraneous_rparen_in_condition : Error<
+  "extraneous ')' after condition, expected a statement">;
 def warn_parens_disambiguated_as_function_decl : Warning<
   "parentheses were disambiguated as a function declarator">,
   InGroup<VexingParse>;
@@ -464,11 +466,14 @@ def warn_cxx98_compat_alignas : Warning<"'alignas' is incompatible with C++98">,
 def warn_cxx98_compat_attribute : Warning<
   "attributes are incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
-def err_cxx0x_attribute_forbids_arguments : Error<
-  "C++11 attribute '%0' cannot have an argument list">;
-def err_cxx0x_attribute_requires_arguments : Error<
-  "C++11 attribute '%0' must have an argument list">;
+def err_cxx11_attribute_forbids_arguments : Error<
+  "attribute '%0' cannot have an argument list">;
+def err_cxx11_attribute_forbids_ellipsis : Error<
+  "attribute '%0' cannot be used as an attribute pack">;
 def err_attributes_not_allowed : Error<"an attribute list cannot appear here">;
+def err_l_square_l_square_not_attribute : Error<
+  "C++11 only allows consecutive left square brackets when "
+  "introducing an attribute">;
 def err_alignas_pack_exp_unsupported : Error<
   "pack expansions in alignment specifiers are not supported yet">;
 
@@ -490,7 +495,7 @@ def err_two_right_angle_brackets_need_space : Error<
   "a space is required between consecutive right angle brackets (use '> >')">;
 def warn_cxx0x_right_shift_in_template_arg : Warning<
   "use of right-shift operator ('>>') in template argument will require "
-  "parentheses in C++11">;
+  "parentheses in C++11">, InGroup<CXX11Compat>;
 def warn_cxx98_compat_two_right_angle_brackets : Warning<
   "consecutive right angle brackets are incompatible with C++98 (use '> >')">,
   InGroup<CXX98Compat>, DefaultIgnore;
@@ -647,7 +652,8 @@ def err_availability_unknown_change : Error<
 def err_availability_redundant : Error<
   "redundant %0 availability change; only the last specified change will "        "be used">;
 def warn_availability_and_unavailable : Warning<
-  "'unavailable' availability overrides all other availability information">;
+  "'unavailable' availability overrides all other availability information">,
+  InGroup<Availability>;
 
 // Language specific pragmas
 // - Generic warnings

@@ -1,6 +1,7 @@
 from clang.cindex import CursorKind
 from clang.cindex import TypeKind
 from .util import get_cursor
+from .util import get_cursors
 from .util import get_tu
 
 kInput = """\
@@ -75,6 +76,30 @@ def test_underlying_type():
     underlying = typedef.underlying_typedef_type
     assert underlying.kind == TypeKind.INT
 
+kParentTest = """\
+        class C {
+            void f();
+        }
+
+        void C::f() { }
+    """
+def test_semantic_parent():
+    tu = get_tu(kParentTest, 'cpp')
+    curs = get_cursors(tu, 'f')
+    decl = get_cursor(tu, 'C')
+    assert(len(curs) == 2)
+    assert(curs[0].semantic_parent == curs[1].semantic_parent)
+    assert(curs[0].semantic_parent == decl)
+
+def test_lexical_parent():
+    tu = get_tu(kParentTest, 'cpp')
+    curs = get_cursors(tu, 'f')
+    decl = get_cursor(tu, 'C')
+    assert(len(curs) == 2)
+    assert(curs[0].lexical_parent != curs[1].lexical_parent)
+    assert(curs[0].lexical_parent == decl)
+    assert(curs[1].lexical_parent == tu.cursor)
+
 def test_enum_type():
     tu = get_tu('enum TEST { FOO=1, BAR=2 };')
     enum = get_cursor(tu, 'TEST')
@@ -84,9 +109,66 @@ def test_enum_type():
     enum_type = enum.enum_type
     assert enum_type.kind == TypeKind.UINT
 
+def test_enum_type_cpp():
+    tu = get_tu('enum TEST : long long { FOO=1, BAR=2 };', lang="cpp")
+    enum = get_cursor(tu, 'TEST')
+    assert enum is not None
+
+    assert enum.kind == CursorKind.ENUM_DECL
+    assert enum.enum_type.kind == TypeKind.LONGLONG
+
 def test_objc_type_encoding():
     tu = get_tu('int i;', lang='objc')
     i = get_cursor(tu, 'i')
 
     assert i is not None
     assert i.objc_type_encoding == 'i'
+
+def test_enum_values():
+    tu = get_tu('enum TEST { SPAM=1, EGG, HAM = EGG * 20};')
+    enum = get_cursor(tu, 'TEST')
+    assert enum is not None
+
+    assert enum.kind == CursorKind.ENUM_DECL
+
+    enum_constants = list(enum.get_children())
+    assert len(enum_constants) == 3
+
+    spam, egg, ham = enum_constants
+
+    assert spam.kind == CursorKind.ENUM_CONSTANT_DECL
+    assert spam.enum_value == 1
+    assert egg.kind == CursorKind.ENUM_CONSTANT_DECL
+    assert egg.enum_value == 2
+    assert ham.kind == CursorKind.ENUM_CONSTANT_DECL
+    assert ham.enum_value == 40
+
+def test_enum_values_cpp():
+    tu = get_tu('enum TEST : long long { SPAM = -1, HAM = 0x10000000000};', lang="cpp")
+    enum = get_cursor(tu, 'TEST')
+    assert enum is not None
+
+    assert enum.kind == CursorKind.ENUM_DECL
+
+    enum_constants = list(enum.get_children())
+    assert len(enum_constants) == 2
+
+    spam, ham = enum_constants
+
+    assert spam.kind == CursorKind.ENUM_CONSTANT_DECL
+    assert spam.enum_value == -1
+    assert ham.kind == CursorKind.ENUM_CONSTANT_DECL
+    assert ham.enum_value == 0x10000000000
+
+def test_annotation_attribute():
+    tu = get_tu('int foo (void) __attribute__ ((annotate("here be annotation attribute")));')
+
+    foo = get_cursor(tu, 'foo')
+    assert foo is not None
+
+    for c in foo.get_children():
+        if c.kind == CursorKind.ANNOTATE_ATTR:
+            assert c.displayname == "here be annotation attribute"
+            break
+    else:
+        assert False, "Couldn't find annotation"

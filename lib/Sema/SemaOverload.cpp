@@ -28,6 +28,7 @@
 #include "clang/Basic/PartialDiagnostic.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/STLExtras.h"
 #include <algorithm>
 
@@ -541,6 +542,7 @@ static MakeDeductionFailureInfo(ASTContext &Context,
                                 TemplateDeductionInfo &Info) {
   OverloadCandidate::DeductionFailureInfo Result;
   Result.Result = static_cast<unsigned>(TDK);
+  Result.HasDiagnostic = false;
   Result.Data = 0;
   switch (TDK) {
   case Sema::TDK_Success:
@@ -567,6 +569,12 @@ static MakeDeductionFailureInfo(ASTContext &Context,
 
   case Sema::TDK_SubstitutionFailure:
     Result.Data = Info.take();
+    if (Info.hasSFINAEDiagnostic()) {
+      PartialDiagnosticAt *Diag = new (Result.Diagnostic) PartialDiagnosticAt(
+          SourceLocation(), PartialDiagnostic::NullDiagnostic());
+      Info.takeSFINAEDiagnostic(*Diag);
+      Result.HasDiagnostic = true;
+    }
     break;
 
   case Sema::TDK_NonDeducedMismatch:
@@ -594,8 +602,12 @@ void OverloadCandidate::DeductionFailureInfo::Destroy() {
     break;
 
   case Sema::TDK_SubstitutionFailure:
-    // FIXME: Destroy the template arugment list?
+    // FIXME: Destroy the template argument list?
     Data = 0;
+    if (PartialDiagnosticAt *Diag = getSFINAEDiagnostic()) {
+      Diag->~PartialDiagnosticAt();
+      HasDiagnostic = false;
+    }
     break;
 
   // Unhandled
@@ -603,6 +615,13 @@ void OverloadCandidate::DeductionFailureInfo::Destroy() {
   case Sema::TDK_FailedOverloadResolution:
     break;
   }
+}
+
+PartialDiagnosticAt *
+OverloadCandidate::DeductionFailureInfo::getSFINAEDiagnostic() {
+  if (HasDiagnostic)
+    return static_cast<PartialDiagnosticAt*>(static_cast<void*>(Diagnostic));
+  return 0;
 }
 
 TemplateParameter
@@ -1294,6 +1313,11 @@ static bool IsVectorConversion(ASTContext &Context, QualType FromType,
   return false;
 }
 
+static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
+                                bool InOverloadResolution,
+                                StandardConversionSequence &SCS,
+                                bool CStyle);
+  
 /// IsStandardConversion - Determines whether there is a standard
 /// conversion sequence (C++ [conv], C++ [over.ics.scs]) from the
 /// expression From to the type ToType. Standard conversion sequences
@@ -1388,6 +1412,12 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
       !FromType->isFunctionType() && !FromType->isArrayType() &&
       S.Context.getCanonicalType(FromType) != S.Context.OverloadTy) {
     SCS.First = ICK_Lvalue_To_Rvalue;
+
+    // C11 6.3.2.1p2:
+    //   ... if the lvalue has atomic type, the value has the non-atomic version 
+    //   of the type of the lvalue ...
+    if (const AtomicType *Atomic = FromType->getAs<AtomicType>())
+      FromType = Atomic->getValueType();
 
     // If T is a non-class type, the type of the rvalue is the
     // cv-unqualified version of T. Otherwise, the type of the rvalue
@@ -1520,6 +1550,11 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
                                              SCS, CStyle)) {
     SCS.Second = ICK_TransparentUnionConversion;
     FromType = ToType;
+  } else if (tryAtomicConversion(S, From, ToType, InOverloadResolution, SCS,
+                                 CStyle)) {
+    // tryAtomicConversion has updated the standard conversion sequence
+    // appropriately.
+    return true;
   } else {
     // No second conversion required.
     SCS.Second = ICK_Identity;
@@ -1641,7 +1676,7 @@ bool Sema::IsIntegralPromotion(Expr *From, QualType FromType, QualType ToType) {
 
     // We have already pre-calculated the promotion type, so this is trivial.
     if (ToType->isIntegerType() &&
-        !RequireCompleteType(From->getLocStart(), FromType, PDiag()))
+        !RequireCompleteType(From->getLocStart(), FromType, 0))
       return Context.hasSameUnqualifiedType(ToType,
                                 FromEnumType->getDecl()->getPromotionType());
   }
@@ -1971,7 +2006,7 @@ bool Sema::IsPointerConversion(Expr *From, QualType FromType, QualType ToType,
   if (getLangOpts().CPlusPlus &&
       FromPointeeType->isRecordType() && ToPointeeType->isRecordType() &&
       !Context.hasSameUnqualifiedType(FromPointeeType, ToPointeeType) &&
-      !RequireCompleteType(From->getLocStart(), FromPointeeType, PDiag()) &&
+      !RequireCompleteType(From->getLocStart(), FromPointeeType, 0) &&
       IsDerivedFrom(FromPointeeType, ToPointeeType)) {
     ConvertedType = BuildSimilarlyQualifiedPointerType(FromTypePtr,
                                                        ToPointeeType,
@@ -2600,7 +2635,7 @@ bool Sema::IsMemberPointerConversion(Expr *From, QualType FromType,
   QualType ToClass(ToTypePtr->getClass(), 0);
 
   if (!Context.hasSameUnqualifiedType(FromClass, ToClass) &&
-      !RequireCompleteType(From->getLocStart(), ToClass, PDiag()) &&
+      !RequireCompleteType(From->getLocStart(), ToClass, 0) &&
       IsDerivedFrom(ToClass, FromClass)) {
     ConvertedType = Context.getMemberPointerType(FromTypePtr->getPointeeType(),
                                                  ToClass.getTypePtr());
@@ -2758,6 +2793,34 @@ Sema::IsQualificationConversion(QualType FromType, QualType ToType,
   return UnwrappedAnyPointer && Context.hasSameUnqualifiedType(FromType,ToType);
 }
 
+/// \brief - Determine whether this is a conversion from a scalar type to an
+/// atomic type.
+///
+/// If successful, updates \c SCS's second and third steps in the conversion
+/// sequence to finish the conversion.
+static bool tryAtomicConversion(Sema &S, Expr *From, QualType ToType,
+                                bool InOverloadResolution,
+                                StandardConversionSequence &SCS,
+                                bool CStyle) {
+  const AtomicType *ToAtomic = ToType->getAs<AtomicType>();
+  if (!ToAtomic)
+    return false;
+  
+  StandardConversionSequence InnerSCS;
+  if (!IsStandardConversion(S, From, ToAtomic->getValueType(), 
+                            InOverloadResolution, InnerSCS,
+                            CStyle, /*AllowObjCWritebackConversion=*/false))
+    return false;
+  
+  SCS.Second = InnerSCS.Second;
+  SCS.setToType(1, InnerSCS.getToType(1));
+  SCS.Third = InnerSCS.Third;
+  SCS.QualificationIncludesObjCLifetime
+    = InnerSCS.QualificationIncludesObjCLifetime;
+  SCS.setToType(2, InnerSCS.getToType(2));
+  return true;
+}
+
 static bool isFirstArgumentCompatibleWithType(ASTContext &Context,
                                               CXXConstructorDecl *Constructor,
                                               QualType Type) {
@@ -2879,7 +2942,7 @@ IsUserDefinedConversion(Sema &S, Expr *From, QualType ToType,
          S.IsDerivedFrom(From->getType(), ToType)))
       ConstructorsOnly = true;
 
-    S.RequireCompleteType(From->getLocStart(), ToType, S.PDiag());
+    S.RequireCompleteType(From->getLocStart(), ToType, 0);
     // RequireCompleteType may have returned true due to some invalid decl
     // during template instantiation, but ToType may be complete enough now
     // to try to recover.
@@ -2957,8 +3020,7 @@ IsUserDefinedConversion(Sema &S, Expr *From, QualType ToType,
 
   // Enumerate conversion functions, if we're allowed to.
   if (ConstructorsOnly || isa<InitListExpr>(From)) {
-  } else if (S.RequireCompleteType(From->getLocStart(), From->getType(),
-                                   S.PDiag(0) << From->getSourceRange())) {
+  } else if (S.RequireCompleteType(From->getLocStart(), From->getType(), 0)) {
     // No conversion functions from incomplete types.
   } else if (const RecordType *FromRecordType
                                    = From->getType()->getAs<RecordType>()) {
@@ -3804,7 +3866,7 @@ Sema::CompareReferenceRelationship(SourceLocation Loc,
   ObjCLifetimeConversion = false;
   if (UnqualT1 == UnqualT2) {
     // Nothing to do.
-  } else if (!RequireCompleteType(Loc, OrigT2, PDiag()) &&
+  } else if (!RequireCompleteType(Loc, OrigT2, 0) &&
            IsDerivedFrom(UnqualT2, UnqualT1))
     DerivedToBase = true;
   else if (UnqualT1->isObjCObjectOrInterfaceType() &&
@@ -4269,7 +4331,7 @@ TryListConversion(Sema &S, InitListExpr *From, QualType ToType,
 
   // We need a complete type for what follows. Incomplete types can never be
   // initialized from init lists.
-  if (S.RequireCompleteType(From->getLocStart(), ToType, S.PDiag()))
+  if (S.RequireCompleteType(From->getLocStart(), ToType, 0))
     return Result;
 
   // C++11 [over.ics.list]p2:
@@ -4982,13 +5044,7 @@ static bool isIntegralOrEnumerationType(QualType T, bool AllowScopedEnum) {
 /// successful.
 ExprResult
 Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
-                                         const PartialDiagnostic &NotIntDiag,
-                                       const PartialDiagnostic &IncompleteDiag,
-                                     const PartialDiagnostic &ExplicitConvDiag,
-                                     const PartialDiagnostic &ExplicitConvNote,
-                                         const PartialDiagnostic &AmbigDiag,
-                                         const PartialDiagnostic &AmbigNote,
-                                         const PartialDiagnostic &ConvDiag,
+                                         ICEConvertDiagnoser &Diagnoser,
                                          bool AllowScopedEnumerations) {
   // We can't perform any more checking for type-dependent expressions.
   if (From->isTypeDependent())
@@ -5012,13 +5068,25 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
   // expression of integral or enumeration type.
   const RecordType *RecordTy = T->getAs<RecordType>();
   if (!RecordTy || !getLangOpts().CPlusPlus) {
-    if (NotIntDiag.getDiagID())
-      Diag(Loc, NotIntDiag) << T << From->getSourceRange();
+    if (!Diagnoser.Suppress)
+      Diagnoser.diagnoseNotInt(*this, Loc, T) << From->getSourceRange();
     return Owned(From);
   }
 
   // We must have a complete class type.
-  if (RequireCompleteType(Loc, T, IncompleteDiag))
+  struct TypeDiagnoserPartialDiag : TypeDiagnoser {
+    ICEConvertDiagnoser &Diagnoser;
+    Expr *From;
+    
+    TypeDiagnoserPartialDiag(ICEConvertDiagnoser &Diagnoser, Expr *From)
+      : TypeDiagnoser(Diagnoser.Suppress), Diagnoser(Diagnoser), From(From) {}
+    
+    virtual void diagnose(Sema &S, SourceLocation Loc, QualType T) {
+      Diagnoser.diagnoseIncomplete(S, Loc, T) << From->getSourceRange();
+    }
+  } IncompleteDiagnoser(Diagnoser, From);
+
+  if (RequireCompleteType(Loc, T, IncompleteDiagnoser))
     return Owned(From);
 
   // Look for a conversion to an integral or enumeration type.
@@ -5048,7 +5116,7 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
 
   switch (ViableConversions.size()) {
   case 0:
-    if (ExplicitConversions.size() == 1 && ExplicitConvDiag.getDiagID()) {
+    if (ExplicitConversions.size() == 1 && !Diagnoser.Suppress) {
       DeclAccessPair Found = ExplicitConversions[0];
       CXXConversionDecl *Conversion
         = cast<CXXConversionDecl>(Found->getUnderlyingDecl());
@@ -5060,14 +5128,12 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
       std::string TypeStr;
       ConvTy.getAsStringInternal(TypeStr, getPrintingPolicy());
 
-      Diag(Loc, ExplicitConvDiag)
-        << T << ConvTy
+      Diagnoser.diagnoseExplicitConv(*this, Loc, T, ConvTy)
         << FixItHint::CreateInsertion(From->getLocStart(),
                                       "static_cast<" + TypeStr + ">(")
         << FixItHint::CreateInsertion(PP.getLocForEndOfToken(From->getLocEnd()),
                                       ")");
-      Diag(Conversion->getLocation(), ExplicitConvNote)
-        << ConvTy->isEnumeralType() << ConvTy;
+      Diagnoser.noteExplicitConv(*this, Conversion, ConvTy);
 
       // If we aren't in a SFINAE context, build a call to the
       // explicit conversion function.
@@ -5098,12 +5164,12 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
       = cast<CXXConversionDecl>(Found->getUnderlyingDecl());
     QualType ConvTy
       = Conversion->getConversionType().getNonReferenceType();
-    if (ConvDiag.getDiagID()) {
+    if (!Diagnoser.SuppressConversion) {
       if (isSFINAEContext())
         return ExprError();
 
-      Diag(Loc, ConvDiag)
-        << T << ConvTy->isEnumeralType() << ConvTy << From->getSourceRange();
+      Diagnoser.diagnoseConversion(*this, Loc, T, ConvTy)
+        << From->getSourceRange();
     }
 
     ExprResult Result = BuildCXXMemberCallExpr(From, Found, Conversion,
@@ -5119,24 +5185,24 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
   }
 
   default:
-    if (!AmbigDiag.getDiagID())
-      return Owned(From);
+    if (Diagnoser.Suppress)
+      return ExprError();
 
-    Diag(Loc, AmbigDiag)
-      << T << From->getSourceRange();
+    Diagnoser.diagnoseAmbiguous(*this, Loc, T) << From->getSourceRange();
     for (unsigned I = 0, N = ViableConversions.size(); I != N; ++I) {
       CXXConversionDecl *Conv
         = cast<CXXConversionDecl>(ViableConversions[I]->getUnderlyingDecl());
       QualType ConvTy = Conv->getConversionType().getNonReferenceType();
-      Diag(Conv->getLocation(), AmbigNote)
-        << ConvTy->isEnumeralType() << ConvTy;
+      Diagnoser.noteAmbiguous(*this, Conv, ConvTy);
     }
     return Owned(From);
   }
 
   if (!isIntegralOrEnumerationType(From->getType(), AllowScopedEnumerations) &&
-      NotIntDiag.getDiagID())
-    Diag(Loc, NotIntDiag) << From->getType() << From->getSourceRange();
+      !Diagnoser.Suppress) {
+    Diagnoser.diagnoseNotInt(*this, Loc, From->getType())
+      << From->getSourceRange();
+  }
 
   return DefaultLvalueConversion(From);
 }
@@ -5862,7 +5928,7 @@ void Sema::AddMemberOperatorCandidates(OverloadedOperatorKind Op,
   //        empty.
   if (const RecordType *T1Rec = T1->getAs<RecordType>()) {
     // Complete the type if it can be completed. Otherwise, we're done.
-    if (RequireCompleteType(OpLoc, T1, PDiag()))
+    if (RequireCompleteType(OpLoc, T1, 0))
       return;
 
     LookupResult Operators(*this, OpName, OpLoc, LookupOrdinaryName);
@@ -6382,7 +6448,7 @@ class BuiltinOperatorOverloadBuilder {
     enum PromotedType {
                   Flt,  Dbl, LDbl,   SI,   SL,  SLL,   UI,   UL,  ULL, Dep=-1
     };
-    static PromotedType ConversionsTable[LastPromotedArithmeticType]
+    static const PromotedType ConversionsTable[LastPromotedArithmeticType]
                                         [LastPromotedArithmeticType] = {
       /* Flt*/ {  Flt,  Dbl, LDbl,  Flt,  Flt,  Flt,  Flt,  Flt,  Flt },
       /* Dbl*/ {  Dbl,  Dbl, LDbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl },
@@ -8083,9 +8149,14 @@ void DiagnoseArityMismatch(Sema &S, OverloadCandidate *Cand,
   std::string Description;
   OverloadCandidateKind FnKind = ClassifyOverloadCandidate(S, Fn, Description);
 
-  S.Diag(Fn->getLocation(), diag::note_ovl_candidate_arity)
-    << (unsigned) FnKind << (Fn->getDescribedFunctionTemplate() != 0) << mode
-    << modeCount << NumFormalArgs;
+  if (modeCount == 1 && Fn->getParamDecl(0)->getDeclName())
+    S.Diag(Fn->getLocation(), diag::note_ovl_candidate_arity_one)
+      << (unsigned) FnKind << (Fn->getDescribedFunctionTemplate() != 0) << mode
+      << Fn->getParamDecl(0) << NumFormalArgs;
+  else
+    S.Diag(Fn->getLocation(), diag::note_ovl_candidate_arity)
+      << (unsigned) FnKind << (Fn->getDescribedFunctionTemplate() != 0) << mode
+      << modeCount << NumFormalArgs;
   MaybeEmitInheritedConstructorNote(S, Fn);
 }
 
@@ -8188,14 +8259,39 @@ void DiagnoseBadDeduction(Sema &S, OverloadCandidate *Cand,
     return;
 
   case Sema::TDK_SubstitutionFailure: {
-    std::string ArgString;
-    if (TemplateArgumentList *Args
-                            = Cand->DeductionFailure.getTemplateArgumentList())
-      ArgString = S.getTemplateArgumentBindingsText(
-                    Fn->getDescribedFunctionTemplate()->getTemplateParameters(),
-                                                    *Args);
+    // Format the template argument list into the argument string.
+    llvm::SmallString<128> TemplateArgString;
+    if (TemplateArgumentList *Args =
+          Cand->DeductionFailure.getTemplateArgumentList()) {
+      TemplateArgString = " ";
+      TemplateArgString += S.getTemplateArgumentBindingsText(
+          Fn->getDescribedFunctionTemplate()->getTemplateParameters(), *Args);
+    }
+
+    // If this candidate was disabled by enable_if, say so.
+    PartialDiagnosticAt *PDiag = Cand->DeductionFailure.getSFINAEDiagnostic();
+    if (PDiag && PDiag->second.getDiagID() ==
+          diag::err_typename_nested_not_found_enable_if) {
+      // FIXME: Use the source range of the condition, and the fully-qualified
+      //        name of the enable_if template. These are both present in PDiag.
+      S.Diag(PDiag->first, diag::note_ovl_candidate_disabled_by_enable_if)
+        << "'enable_if'" << TemplateArgString;
+      return;
+    }
+
+    // Format the SFINAE diagnostic into the argument string.
+    // FIXME: Add a general mechanism to include a PartialDiagnostic *'s
+    //        formatted message in another diagnostic.
+    llvm::SmallString<128> SFINAEArgString;
+    SourceRange R;
+    if (PDiag) {
+      SFINAEArgString = ": ";
+      R = SourceRange(PDiag->first, PDiag->first);
+      PDiag->second.EmitToString(S.getDiagnostics(), SFINAEArgString);
+    }
+
     S.Diag(Fn->getLocation(), diag::note_ovl_candidate_substitution_failure)
-      << ArgString;
+      << TemplateArgString << SFINAEArgString << R;
     MaybeEmitInheritedConstructorNote(S, Fn);
     return;
   }
@@ -10566,8 +10662,7 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Obj,
   DeclarationName OpName = Context.DeclarationNames.getCXXOperatorName(OO_Call);
 
   if (RequireCompleteType(LParenLoc, Object.get()->getType(),
-                          PDiag(diag::err_incomplete_object_call)
-                          << Object.get()->getSourceRange()))
+                          diag::err_incomplete_object_call, Object.get()))
     return true;
 
   LookupResult R(*this, OpName, LParenLoc, LookupOrdinaryName);
@@ -10855,8 +10950,7 @@ Sema::BuildOverloadedArrowExpr(Scope *S, Expr *Base, SourceLocation OpLoc) {
   const RecordType *BaseRecord = Base->getType()->getAs<RecordType>();
 
   if (RequireCompleteType(Loc, Base->getType(),
-                          PDiag(diag::err_typecheck_incomplete_tag)
-                            << Base->getSourceRange()))
+                          diag::err_typecheck_incomplete_tag, Base))
     return ExprError();
 
   LookupResult R(*this, OpName, OpLoc, LookupOrdinaryName);
@@ -11106,6 +11200,7 @@ Expr *Sema::FixOverloadedFunctionReference(Expr *E, DeclAccessPair Found,
                                            VK_LValue,
                                            Found.getDecl(),
                                            TemplateArgs);
+    MarkDeclRefReferenced(DRE);
     DRE->setHadMultipleCandidates(ULE->getNumDecls() > 1);
     return DRE;
   }
@@ -11134,6 +11229,7 @@ Expr *Sema::FixOverloadedFunctionReference(Expr *E, DeclAccessPair Found,
                                                VK_LValue,
                                                Found.getDecl(),
                                                TemplateArgs);
+        MarkDeclRefReferenced(DRE);
         DRE->setHadMultipleCandidates(MemExpr->getNumDecls() > 1);
         return DRE;
       } else {

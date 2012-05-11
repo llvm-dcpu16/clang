@@ -894,6 +894,7 @@ ParsedType Parser::ParseObjCTypeName(ObjCDeclSpec &DS,
     DeclSpec declSpec(AttrFactory);
     declSpec.setObjCQualifiers(&DS);
     ParseSpecifierQualifierList(declSpec);
+    declSpec.SetRangeEnd(Tok.getLocation().getLocWithOffset(-1));
     Declarator declarator(declSpec, context);
     ParseDeclarator(declarator);
 
@@ -965,7 +966,7 @@ Decl *Parser::ParseObjCMethodDecl(SourceLocation mLoc,
                                   tok::TokenKind mType,
                                   tok::ObjCKeywordKind MethodImplKind,
                                   bool MethodDefinition) {
-  ParsingDeclRAIIObject PD(*this);
+  ParsingDeclRAIIObject PD(*this, ParsingDeclRAIIObject::NoParent);
 
   if (Tok.is(tok::code_completion)) {
     Actions.CodeCompleteObjCMethodDecl(getCurScope(), mType == tok::minus, 
@@ -2066,6 +2067,10 @@ ExprResult Parser::ParseObjCAtExpression(SourceLocation AtLoc) {
     // Objective-C dictionary literal
     return ParsePostfixExpressionSuffix(ParseObjCDictionaryLiteral(AtLoc));
           
+  case tok::l_paren:
+    // Objective-C boxed expression
+    return ParsePostfixExpressionSuffix(ParseObjCBoxedExpr(AtLoc));
+          
   default:
     if (Tok.getIdentifierInfo() == 0)
       return ExprError(Diag(AtLoc, diag::err_unexpected_at));
@@ -2580,6 +2585,31 @@ ExprResult Parser::ParseObjCNumericLiteral(SourceLocation AtLoc) {
   return Owned(Actions.BuildObjCNumericLiteral(AtLoc, Lit.take()));
 }
 
+/// ParseObjCBoxedExpr -
+/// objc-box-expression:
+///       @( assignment-expression )
+ExprResult
+Parser::ParseObjCBoxedExpr(SourceLocation AtLoc) {
+  if (Tok.isNot(tok::l_paren))
+    return ExprError(Diag(Tok, diag::err_expected_lparen_after) << "@");
+
+  BalancedDelimiterTracker T(*this, tok::l_paren);
+  T.consumeOpen();
+  ExprResult ValueExpr(ParseAssignmentExpression());
+  if (T.consumeClose())
+    return ExprError();
+
+  if (ValueExpr.isInvalid())
+    return ExprError();
+
+  // Wrap the sub-expression in a parenthesized expression, to distinguish
+  // a boxed expression from a literal.
+  SourceLocation LPLoc = T.getOpenLocation(), RPLoc = T.getCloseLocation();
+  ValueExpr = Actions.ActOnParenExpr(LPLoc, RPLoc, ValueExpr.take());
+  return Owned(Actions.BuildObjCBoxedExpr(SourceRange(AtLoc, RPLoc),
+                                          ValueExpr.take()));
+}
+
 ExprResult Parser::ParseObjCArrayLiteral(SourceLocation AtLoc) {
   ExprVector ElementExprs(Actions);                   // array elements.
   ConsumeBracket(); // consume the l_square.
@@ -2811,11 +2841,9 @@ Decl *Parser::ParseLexedObjCMethodDefs(LexedMethod &LM) {
   // specified Declarator for the method.
   Actions.ActOnStartOfObjCMethodDef(getCurScope(), MDecl);
     
-  if (PP.isCodeCompletionEnabled()) {
-      if (trySkippingFunctionBodyForCodeCompletion()) {
-          BodyScope.Exit();
-          return Actions.ActOnFinishFunctionBody(MDecl, 0);
-      }
+  if (SkipFunctionBodies && trySkippingFunctionBody()) {
+    BodyScope.Exit();
+    return Actions.ActOnFinishFunctionBody(MDecl, 0);
   }
     
   StmtResult FnBody(ParseCompoundStatementBody());

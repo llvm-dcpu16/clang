@@ -436,6 +436,8 @@ void ASTContext::InitBuiltinTypes(const TargetInfo &Target) {
   } else // C99
     WCharTy = getFromTargetType(Target.getWCharType());
 
+  WIntTy = getFromTargetType(Target.getWIntType());
+
   if (LangOpts.CPlusPlus) // C++0x 3.9.1p5, extension for C++
     InitBuiltinType(Char16Ty,           BuiltinType::Char16);
   else // C99
@@ -481,7 +483,8 @@ void ASTContext::InitBuiltinTypes(const TargetInfo &Target) {
   InitBuiltinType(ObjCBuiltinSelTy, BuiltinType::ObjCSel);
   
   // Builtin type for __objc_yes and __objc_no
-  ObjCBuiltinBoolTy = SignedCharTy;
+  ObjCBuiltinBoolTy = (Target.useSignedCharForObjCBool() ?
+                       SignedCharTy : BoolTy);
   
   ObjCConstantStringType = QualType();
 
@@ -1186,7 +1189,7 @@ void ASTContext::DeepCollectObjCIvars(const ObjCInterfaceDecl *OI,
   if (!leafClass) {
     for (ObjCInterfaceDecl::ivar_iterator I = OI->ivar_begin(),
          E = OI->ivar_end(); I != E; ++I)
-      Ivars.push_back(*I);
+      Ivars.push_back(&*I);
   } else {
     ObjCInterfaceDecl *IDecl = const_cast<ObjCInterfaceDecl *>(OI);
     for (const ObjCIvarDecl *Iv = IDecl->all_declared_ivar_begin(); Iv; 
@@ -2193,6 +2196,8 @@ ASTContext::getFunctionType(QualType ResultTy,
     Size += EPI.NumExceptions * sizeof(QualType);
   else if (EPI.ExceptionSpecType == EST_ComputedNoexcept) {
     Size += sizeof(Expr*);
+  } else if (EPI.ExceptionSpecType == EST_Uninstantiated) {
+    Size += 2 * sizeof(FunctionDecl*);
   }
   if (EPI.ConsumedArguments)
     Size += NumArgs * sizeof(bool);
@@ -4224,7 +4229,7 @@ void ASTContext::getObjCEncodingForPropertyDecl(const ObjCPropertyDecl *PD,
       for (ObjCCategoryImplDecl::propimpl_iterator
              i = CID->propimpl_begin(), e = CID->propimpl_end();
            i != e; ++i) {
-        ObjCPropertyImplDecl *PID = *i;
+        ObjCPropertyImplDecl *PID = &*i;
         if (PID->getPropertyDecl() == PD) {
           if (PID->getPropertyImplementation()==ObjCPropertyImplDecl::Dynamic) {
             Dynamic = true;
@@ -4238,7 +4243,7 @@ void ASTContext::getObjCEncodingForPropertyDecl(const ObjCPropertyDecl *PD,
       for (ObjCCategoryImplDecl::propimpl_iterator
              i = OID->propimpl_begin(), e = OID->propimpl_end();
            i != e; ++i) {
-        ObjCPropertyImplDecl *PID = *i;
+        ObjCPropertyImplDecl *PID = &*i;
         if (PID->getPropertyDecl() == PD) {
           if (PID->getPropertyImplementation()==ObjCPropertyImplDecl::Dynamic) {
             Dynamic = true;
@@ -4560,7 +4565,7 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
           // Special case bit-fields.
           if (Field->isBitField()) {
             getObjCEncodingForTypeImpl(Field->getType(), S, false, true,
-                                       (*Field));
+                                       &*Field);
           } else {
             QualType qt = Field->getType();
             getLegacyIntegralTypeEncoding(qt);
@@ -4756,7 +4761,7 @@ void ASTContext::getObjCEncodingForStructureImpl(RecordDecl *RDecl,
        Field != FieldEnd; ++Field, ++i) {
     uint64_t offs = layout.getFieldOffset(i);
     FieldOrBaseOffsets.insert(FieldOrBaseOffsets.upper_bound(offs),
-                              std::make_pair(offs, *Field));
+                              std::make_pair(offs, &*Field));
   }
 
   if (CXXRec && includeVBases) {
@@ -4784,11 +4789,8 @@ void ASTContext::getObjCEncodingForStructureImpl(RecordDecl *RDecl,
   std::multimap<uint64_t, NamedDecl *>::iterator
     CurLayObj = FieldOrBaseOffsets.begin();
 
-  if ((CurLayObj != FieldOrBaseOffsets.end() && CurLayObj->first != 0) ||
-      (CurLayObj == FieldOrBaseOffsets.end() &&
-         CXXRec && CXXRec->isDynamicClass())) {
-    assert(CXXRec && CXXRec->isDynamicClass() &&
-           "Offset 0 was empty but no VTable ?");
+  if (CXXRec && CXXRec->isDynamicClass() &&
+      (CurLayObj == FieldOrBaseOffsets.end() || CurLayObj->first != 0)) {
     if (FD) {
       S += "\"_vptr$";
       std::string recname = CXXRec->getNameAsString();

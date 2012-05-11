@@ -964,6 +964,8 @@ namespace clang {
       STMT_DEFAULT,
       /// \brief A LabelStmt record.
       STMT_LABEL,
+      /// \brief An AttributedStmt record.
+      STMT_ATTRIBUTED,
       /// \brief An IfStmt record.
       STMT_IF,
       /// \brief A SwitchStmt record.
@@ -1064,7 +1066,7 @@ namespace clang {
       /// \brief An ObjCStringLiteral record.
       EXPR_OBJC_STRING_LITERAL,
 
-      EXPR_OBJC_NUMERIC_LITERAL,
+      EXPR_OBJC_BOXED_EXPRESSION,
       EXPR_OBJC_ARRAY_LITERAL,
       EXPR_OBJC_DICTIONARY_LITERAL,
 

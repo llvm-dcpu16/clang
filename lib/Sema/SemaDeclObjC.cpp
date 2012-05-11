@@ -474,11 +474,11 @@ ActOnStartClassInterface(SourceLocation AtInterfaceLoc,
           Diag(SuperLoc, diag::err_undef_superclass)
             << SuperName << ClassName << SourceRange(AtInterfaceLoc, ClassLoc);
         else if (RequireCompleteType(SuperLoc, 
-                   Context.getObjCInterfaceType(SuperClassDecl),
-                   PDiag(diag::err_forward_superclass)
-                     << SuperClassDecl->getDeclName() 
-                     << ClassName
-                   << SourceRange(AtInterfaceLoc, ClassLoc))) {
+                                  Context.getObjCInterfaceType(SuperClassDecl),
+                                     diag::err_forward_superclass,
+                                     SuperClassDecl->getDeclName(),
+                                     ClassName,
+                                     SourceRange(AtInterfaceLoc, ClassLoc))) {
           SuperClassDecl = 0;
         }
       }
@@ -694,7 +694,7 @@ void Sema::DiagnoseClassExtensionDupMethods(ObjCCategoryDecl *CAT,
   llvm::DenseMap<Selector, const ObjCMethodDecl*> MethodMap;
   for (ObjCInterfaceDecl::method_iterator i = ID->meth_begin(),
        e =  ID->meth_end(); i != e; ++i) {
-    ObjCMethodDecl *MD = *i;
+    ObjCMethodDecl *MD = &*i;
     MethodMap[MD->getSelector()] = MD;
   }
 
@@ -702,7 +702,7 @@ void Sema::DiagnoseClassExtensionDupMethods(ObjCCategoryDecl *CAT,
     return;
   for (ObjCCategoryDecl::method_iterator i = CAT->meth_begin(),
        e =  CAT->meth_end(); i != e; ++i) {
-    ObjCMethodDecl *Method = *i;
+    ObjCMethodDecl *Method = &*i;
     const ObjCMethodDecl *&PrevMethod = MethodMap[Method->getSelector()];
     if (PrevMethod && !MatchTwoMethodDeclarations(Method, PrevMethod)) {
       Diag(Method->getLocation(), diag::err_duplicate_method_decl)
@@ -759,8 +759,8 @@ ActOnStartCategoryInterface(SourceLocation AtInterfaceLoc,
 
   if (!IDecl 
       || RequireCompleteType(ClassLoc, Context.getObjCInterfaceType(IDecl),
-                             PDiag(diag::err_category_forward_interface)
-                               << (CategoryName == 0))) {
+                             diag::err_category_forward_interface,
+                             CategoryName == 0)) {
     // Create an invalid ObjCCategoryDecl to serve as context for
     // the enclosing method declarations.  We mark the decl invalid
     // to make it clear that this isn't a valid AST.
@@ -1064,7 +1064,7 @@ void Sema::CheckImplementationIvars(ObjCImplementationDecl *ImpDecl,
     IVI = IDecl->ivar_begin(), IVE = IDecl->ivar_end();
   for (; numIvars > 0 && IVI != IVE; ++IVI) {
     ObjCIvarDecl* ImplIvar = ivars[j++];
-    ObjCIvarDecl* ClsIvar = *IVI;
+    ObjCIvarDecl* ClsIvar = &*IVI;
     assert (ImplIvar && "missing implementation ivar");
     assert (ClsIvar && "missing class ivar");
 
@@ -1094,7 +1094,7 @@ void Sema::CheckImplementationIvars(ObjCImplementationDecl *ImpDecl,
   if (numIvars > 0)
     Diag(ivars[j]->getLocation(), diag::err_inconsistant_ivar_count);
   else if (IVI != IVE)
-    Diag((*IVI)->getLocation(), diag::err_inconsistant_ivar_count);
+    Diag(IVI->getLocation(), diag::err_inconsistant_ivar_count);
 }
 
 void Sema::WarnUndefinedMethod(SourceLocation ImpLoc, ObjCMethodDecl *method,
@@ -2140,43 +2140,6 @@ ObjCMethodDecl *Sema::LookupImplementedMethodInGlobalPool(Selector Sel) {
   return 0;
 }
 
-/// CompareMethodParamsInBaseAndSuper - This routine compares methods with
-/// identical selector names in current and its super classes and issues
-/// a warning if any of their argument types are incompatible.
-void Sema::CompareMethodParamsInBaseAndSuper(Decl *ClassDecl,
-                                             ObjCMethodDecl *Method,
-                                             bool IsInstance)  {
-  ObjCInterfaceDecl *ID = dyn_cast<ObjCInterfaceDecl>(ClassDecl);
-  if (ID == 0) return;
-
-  while (ObjCInterfaceDecl *SD = ID->getSuperClass()) {
-    ObjCMethodDecl *SuperMethodDecl =
-        SD->lookupMethod(Method->getSelector(), IsInstance);
-    if (SuperMethodDecl == 0) {
-      ID = SD;
-      continue;
-    }
-    ObjCMethodDecl::param_iterator ParamI = Method->param_begin(),
-      E = Method->param_end();
-    ObjCMethodDecl::param_iterator PrevI = SuperMethodDecl->param_begin();
-    for (; ParamI != E; ++ParamI, ++PrevI) {
-      // Number of parameters are the same and is guaranteed by selector match.
-      assert(PrevI != SuperMethodDecl->param_end() && "Param mismatch");
-      QualType T1 = Context.getCanonicalType((*ParamI)->getType());
-      QualType T2 = Context.getCanonicalType((*PrevI)->getType());
-      // If type of argument of method in this class does not match its
-      // respective argument type in the super class method, issue warning;
-      if (!Context.typesAreCompatible(T1, T2)) {
-        Diag((*ParamI)->getLocation(), diag::ext_typecheck_base_super)
-          << T1 << T2;
-        Diag(SuperMethodDecl->getLocation(), diag::note_previous_declaration);
-        return;
-      }
-    }
-    ID = SD;
-  }
-}
-
 /// DiagnoseDuplicateIvars - 
 /// Check for duplicate ivars in the entire class at the start of 
 /// @implementation. This becomes necesssary because class extension can
@@ -2186,7 +2149,7 @@ void Sema::DiagnoseDuplicateIvars(ObjCInterfaceDecl *ID,
                                   ObjCInterfaceDecl *SID) {
   for (ObjCInterfaceDecl::ivar_iterator IVI = ID->ivar_begin(),
        IVE = ID->ivar_end(); IVI != IVE; ++IVI) {
-    ObjCIvarDecl* Ivar = (*IVI);
+    ObjCIvarDecl* Ivar = &*IVI;
     if (Ivar->isInvalidDecl())
       continue;
     if (IdentifierInfo *II = Ivar->getIdentifier()) {
@@ -2273,9 +2236,6 @@ Decl *Sema::ActOnAtEnd(Scope *S, SourceRange AtEnd,
         InsMap[Method->getSelector()] = Method;
         /// The following allows us to typecheck messages to "id".
         AddInstanceMethodToGlobalPool(Method);
-        // verify that the instance method conforms to the same definition of
-        // parent methods if it shadows one.
-        CompareMethodParamsInBaseAndSuper(ClassDecl, Method, true);
       }
     } else {
       /// Check for class method of the same name with incompatible types
@@ -2298,11 +2258,7 @@ Decl *Sema::ActOnAtEnd(Scope *S, SourceRange AtEnd,
           Diag(PrevMethod->getLocation(), diag::note_previous_declaration);
         }
         ClsMap[Method->getSelector()] = Method;
-        /// The following allows us to typecheck messages to "Class".
         AddFactoryMethodToGlobalPool(Method);
-        // verify that the class method conforms to the same definition of
-        // parent methods if it shadows one.
-        CompareMethodParamsInBaseAndSuper(ClassDecl, Method, false);
       }
     }
   }
@@ -2331,7 +2287,7 @@ Decl *Sema::ActOnAtEnd(Scope *S, SourceRange AtEnd,
       for (ObjCContainerDecl::prop_iterator I = CDecl->prop_begin(),
                                             E = CDecl->prop_end();
            I != E; ++I)
-        ProcessPropertyDecl(*I, CDecl);
+        ProcessPropertyDecl(&*I, CDecl);
     CDecl->setAtEndRange(AtEnd);
   }
   if (ObjCImplementationDecl *IC=dyn_cast<ObjCImplementationDecl>(ClassDecl)) {
@@ -2347,7 +2303,7 @@ Decl *Sema::ActOnAtEnd(Scope *S, SourceRange AtEnd,
            ClsExtDecl; ClsExtDecl = ClsExtDecl->getNextClassExtension()) {
         for (ObjCContainerDecl::prop_iterator I = ClsExtDecl->prop_begin(),
              E = ClsExtDecl->prop_end(); I != E; ++I) {
-          ObjCPropertyDecl *Property = (*I);
+          ObjCPropertyDecl *Property = &*I;
           // Skip over properties declared @dynamic
           if (const ObjCPropertyImplDecl *PIDecl
               = IC->FindPropertyImplDecl(Property->getIdentifier()))
@@ -2488,19 +2444,10 @@ bool containsInvalidMethodImplAttribute(ObjCMethodDecl *IMD,
   return false;
 }
 
-namespace  {
-  /// \brief Describes the compatibility of a result type with its method.
-  enum ResultTypeCompatibilityKind {
-    RTC_Compatible,
-    RTC_Incompatible,
-    RTC_Unknown
-  };
-}
-
 /// \brief Check whether the declared result type of the given Objective-C
 /// method declaration is compatible with the method's class.
 ///
-static ResultTypeCompatibilityKind 
+static Sema::ResultTypeCompatibilityKind 
 CheckRelatedResultTypeCompatibility(Sema &S, ObjCMethodDecl *Method,
                                     ObjCInterfaceDecl *CurrentClass) {
   QualType ResultType = Method->getResultType();
@@ -2513,27 +2460,27 @@ CheckRelatedResultTypeCompatibility(Sema &S, ObjCMethodDecl *Method,
     //   - it is id or qualified id, or
     if (ResultObjectType->isObjCIdType() ||
         ResultObjectType->isObjCQualifiedIdType())
-      return RTC_Compatible;
+      return Sema::RTC_Compatible;
   
     if (CurrentClass) {
       if (ObjCInterfaceDecl *ResultClass 
                                       = ResultObjectType->getInterfaceDecl()) {
         //   - it is the same as the method's class type, or
         if (declaresSameEntity(CurrentClass, ResultClass))
-          return RTC_Compatible;
+          return Sema::RTC_Compatible;
         
         //   - it is a superclass of the method's class type
         if (ResultClass->isSuperClassOf(CurrentClass))
-          return RTC_Compatible;
+          return Sema::RTC_Compatible;
       }      
     } else {
       // Any Objective-C pointer type might be acceptable for a protocol
       // method; we just don't know.
-      return RTC_Unknown;
+      return Sema::RTC_Unknown;
     }
   }
   
-  return RTC_Incompatible;
+  return Sema::RTC_Incompatible;
 }
 
 namespace {
@@ -2543,7 +2490,6 @@ class OverrideSearch {
 public:
   Sema &S;
   ObjCMethodDecl *Method;
-  llvm::SmallPtrSet<ObjCContainerDecl*, 128> Searched;
   llvm::SmallPtrSet<ObjCMethodDecl*, 4> Overridden;
   bool Recursive;
 
@@ -2572,8 +2518,12 @@ public:
     // Prevent the search from reaching this container again.  This is
     // important with categories, which override methods from the
     // interface and each other.
-    Searched.insert(container);
-    searchFromContainer(container);
+    if (ObjCCategoryDecl *Category = dyn_cast<ObjCCategoryDecl>(container)) {
+      searchFromContainer(container);
+      searchFromContainer(Category->getClassInterface());
+    } else {
+      searchFromContainer(container);
+    }
   }
 
   typedef llvm::SmallPtrSet<ObjCMethodDecl*, 128>::iterator iterator;
@@ -2609,7 +2559,7 @@ private:
   void searchFrom(ObjCCategoryDecl *category) {
     // A method in a category declaration overrides declarations from
     // the main class and from protocols the category references.
-    search(category->getClassInterface());
+    // The main class is handled in the constructor.
     search(category->getReferencedProtocols());
   }
 
@@ -2619,6 +2569,7 @@ private:
     // declaration.
     if (ObjCCategoryDecl *category = impl->getCategoryDecl()) {
       search(category);
+      search(category->getClassInterface());
 
     // Otherwise it overrides declarations from the class.
     } else {
@@ -2658,9 +2609,6 @@ private:
   }
 
   void search(ObjCContainerDecl *container) {
-    // Abort if we've already searched this container.
-    if (!Searched.insert(container)) return;
-
     // Check for a method in this container which matches this selector.
     ObjCMethodDecl *meth = container->getMethod(Method->getSelector(),
                                                 Method->isInstanceMethod());
@@ -2680,6 +2628,67 @@ private:
     searchFromContainer(container);
   }
 };
+}
+
+void Sema::CheckObjCMethodOverrides(ObjCMethodDecl *ObjCMethod,
+                                    ObjCInterfaceDecl *CurrentClass,
+                                    ResultTypeCompatibilityKind RTC) {
+  // Search for overridden methods and merge information down from them.
+  OverrideSearch overrides(*this, ObjCMethod);
+  // Keep track if the method overrides any method in the class's base classes,
+  // its protocols, or its categories' protocols; we will keep that info
+  // in the ObjCMethodDecl.
+  // For this info, a method in an implementation is not considered as
+  // overriding the same method in the interface or its categories.
+  bool hasOverriddenMethodsInBaseOrProtocol = false;
+  for (OverrideSearch::iterator
+         i = overrides.begin(), e = overrides.end(); i != e; ++i) {
+    ObjCMethodDecl *overridden = *i;
+
+    if (isa<ObjCProtocolDecl>(overridden->getDeclContext()) ||
+        CurrentClass != overridden->getClassInterface() ||
+        overridden->isOverriding())
+      hasOverriddenMethodsInBaseOrProtocol = true;
+
+    // Propagate down the 'related result type' bit from overridden methods.
+    if (RTC != Sema::RTC_Incompatible && overridden->hasRelatedResultType())
+      ObjCMethod->SetRelatedResultType();
+
+    // Then merge the declarations.
+    mergeObjCMethodDecls(ObjCMethod, overridden);
+
+    if (ObjCMethod->isImplicit() && overridden->isImplicit())
+      continue; // Conflicting properties are detected elsewhere.
+
+    // Check for overriding methods
+    if (isa<ObjCInterfaceDecl>(ObjCMethod->getDeclContext()) || 
+        isa<ObjCImplementationDecl>(ObjCMethod->getDeclContext()))
+      CheckConflictingOverridingMethod(ObjCMethod, overridden,
+              isa<ObjCProtocolDecl>(overridden->getDeclContext()));
+    
+    if (CurrentClass && overridden->getDeclContext() != CurrentClass &&
+        isa<ObjCInterfaceDecl>(overridden->getDeclContext())) {
+      ObjCMethodDecl::param_iterator ParamI = ObjCMethod->param_begin(),
+                                          E = ObjCMethod->param_end();
+      ObjCMethodDecl::param_iterator PrevI = overridden->param_begin();
+      for (; ParamI != E; ++ParamI, ++PrevI) {
+        // Number of parameters are the same and is guaranteed by selector match.
+        assert(PrevI != overridden->param_end() && "Param mismatch");
+        QualType T1 = Context.getCanonicalType((*ParamI)->getType());
+        QualType T2 = Context.getCanonicalType((*PrevI)->getType());
+        // If type of argument of method in this class does not match its
+        // respective argument type in the super class method, issue warning;
+        if (!Context.typesAreCompatible(T1, T2)) {
+          Diag((*ParamI)->getLocation(), diag::ext_typecheck_base_super)
+            << T1 << T2;
+          Diag(overridden->getLocation(), diag::note_previous_declaration);
+          break;
+        }
+      }
+    }
+  }
+
+  ObjCMethod->setOverriding(hasOverriddenMethodsInBaseOrProtocol);
 }
 
 Decl *Sema::ActOnMethodDeclaration(
@@ -2871,32 +2880,14 @@ Decl *Sema::ActOnMethodDeclaration(
   ResultTypeCompatibilityKind RTC
     = CheckRelatedResultTypeCompatibility(*this, ObjCMethod, CurrentClass);
 
-  // Search for overridden methods and merge information down from them.
-  OverrideSearch overrides(*this, ObjCMethod);
-  for (OverrideSearch::iterator
-         i = overrides.begin(), e = overrides.end(); i != e; ++i) {
-    ObjCMethodDecl *overridden = *i;
+  CheckObjCMethodOverrides(ObjCMethod, CurrentClass, RTC);
 
-    // Propagate down the 'related result type' bit from overridden methods.
-    if (RTC != RTC_Incompatible && overridden->hasRelatedResultType())
-      ObjCMethod->SetRelatedResultType();
-
-    // Then merge the declarations.
-    mergeObjCMethodDecls(ObjCMethod, overridden);
-    
-    // Check for overriding methods
-    if (isa<ObjCInterfaceDecl>(ObjCMethod->getDeclContext()) || 
-        isa<ObjCImplementationDecl>(ObjCMethod->getDeclContext()))
-      CheckConflictingOverridingMethod(ObjCMethod, overridden,
-              isa<ObjCProtocolDecl>(overridden->getDeclContext()));
-  }
-  
   bool ARCError = false;
   if (getLangOpts().ObjCAutoRefCount)
     ARCError = CheckARCMethodDecl(*this, ObjCMethod);
 
   // Infer the related result type when possible.
-  if (!ARCError && RTC == RTC_Compatible &&
+  if (!ARCError && RTC == Sema::RTC_Compatible &&
       !ObjCMethod->hasRelatedResultType() &&
       LangOpts.ObjCInferRelatedResultType) {
     bool InferRelatedResultType = false;

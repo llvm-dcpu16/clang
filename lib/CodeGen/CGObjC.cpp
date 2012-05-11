@@ -51,36 +51,36 @@ llvm::Value *CodeGenFunction::EmitObjCStringLiteral(const ObjCStringLiteral *E)
   return llvm::ConstantExpr::getBitCast(C, ConvertType(E->getType()));
 }
 
-/// EmitObjCNumericLiteral - This routine generates code for
-/// the appropriate +[NSNumber numberWith<Type>:] method.
+/// EmitObjCBoxedExpr - This routine generates code to call
+/// the appropriate expression boxing method. This will either be
+/// one of +[NSNumber numberWith<Type>:], or +[NSString stringWithUTF8String:].
 ///
 llvm::Value *
-CodeGenFunction::EmitObjCNumericLiteral(const ObjCNumericLiteral *E) {
+CodeGenFunction::EmitObjCBoxedExpr(const ObjCBoxedExpr *E) {
   // Generate the correct selector for this literal's concrete type.
-  const Expr *NL = E->getNumber();
+  const Expr *SubExpr = E->getSubExpr();
   // Get the method.
-  const ObjCMethodDecl *Method = E->getObjCNumericLiteralMethod();
-  assert(Method && "NSNumber method is null");
-  Selector Sel = Method->getSelector();
+  const ObjCMethodDecl *BoxingMethod = E->getBoxingMethod();
+  assert(BoxingMethod && "BoxingMethod is null");
+  assert(BoxingMethod->isClassMethod() && "BoxingMethod must be a class method");
+  Selector Sel = BoxingMethod->getSelector();
   
   // Generate a reference to the class pointer, which will be the receiver.
-  QualType ResultType = E->getType(); // should be NSNumber *
-  const ObjCObjectPointerType *InterfacePointerType = 
-    ResultType->getAsObjCInterfacePointerType();
-  ObjCInterfaceDecl *NSNumberDecl = 
-    InterfacePointerType->getObjectType()->getInterface();
+  // Assumes that the method was introduced in the class that should be
+  // messaged (avoids pulling it out of the result type).
   CGObjCRuntime &Runtime = CGM.getObjCRuntime();
-  llvm::Value *Receiver = Runtime.GetClass(Builder, NSNumberDecl);
-
-  const ParmVarDecl *argDecl = *Method->param_begin();
+  const ObjCInterfaceDecl *ClassDecl = BoxingMethod->getClassInterface();
+  llvm::Value *Receiver = Runtime.GetClass(Builder, ClassDecl);
+  
+  const ParmVarDecl *argDecl = *BoxingMethod->param_begin();
   QualType ArgQT = argDecl->getType().getUnqualifiedType();
-  RValue RV = EmitAnyExpr(NL);
+  RValue RV = EmitAnyExpr(SubExpr);
   CallArgList Args;
   Args.add(RV, ArgQT);
-
+  
   RValue result = Runtime.GenerateMessageSend(*this, ReturnValueSlot(), 
-                                              ResultType, Sel, Receiver, Args, 
-                                              NSNumberDecl, Method);
+                                              BoxingMethod->getResultType(), Sel, Receiver, Args, 
+                                              ClassDecl, BoxingMethod);
   return Builder.CreateBitCast(result.getScalarVal(), 
                                ConvertType(E->getType()));
 }
@@ -859,7 +859,7 @@ CodeGenFunction::generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
     // always objects so we don't need to worry about complex or
     // aggregates.
     RV = RValue::get(Builder.CreateBitCast(RV.getScalarVal(),
-                                           getTypes().ConvertType(propType)));
+           getTypes().ConvertType(getterMethod->getResultType())));
 
     EmitReturnOfRValue(RV, propType);
 
@@ -2782,7 +2782,7 @@ CodeGenFunction::GenerateObjCAtomicSetterCopyHelperFunction(
                                           SC_Static,
                                           SC_None,
                                           false,
-                                          true);
+                                          false);
   
   QualType DestTy = C.getPointerType(Ty);
   QualType SrcTy = Ty;
@@ -2868,7 +2868,7 @@ CodeGenFunction::GenerateObjCAtomicGetterCopyHelperFunction(
                                           SC_Static,
                                           SC_None,
                                           false,
-                                          true);
+                                          false);
   
   QualType DestTy = C.getPointerType(Ty);
   QualType SrcTy = Ty;

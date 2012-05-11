@@ -13,7 +13,7 @@
 #include "clang/Basic/FileManager.h"
 #include "clang/Driver/Arg.h"
 #include "clang/Driver/ArgList.h"
-#include "clang/Driver/CC1Options.h"
+#include "clang/Driver/Options.h"
 #include "clang/Driver/DriverDiagnostic.h"
 #include "clang/Driver/OptTable.h"
 #include "clang/Driver/Option.h"
@@ -181,8 +181,21 @@ static void AnalyzerOptsToArgs(const AnalyzerOptions &Opts, ToArgsList &Res) {
 }
 
 static void CodeGenOptsToArgs(const CodeGenOptions &Opts, ToArgsList &Res) {
-  if (Opts.DebugInfo)
-    Res.push_back("-g");
+  switch (Opts.DebugInfo) {
+    case CodeGenOptions::NoDebugInfo:
+      break;
+    case CodeGenOptions::DebugLineTablesOnly:
+      Res.push_back("-gline-tables-only");
+      break;
+    case CodeGenOptions::LimitedDebugInfo:
+      Res.push_back("-g");
+      Res.push_back("-flimit-debug-info");
+      break;
+    case CodeGenOptions::FullDebugInfo:
+      Res.push_back("-g");
+      Res.push_back("-fno-limit-debug-info");
+      break;
+  }
   if (Opts.DisableLLVMOpts)
     Res.push_back("-disable-llvm-optzns");
   if (Opts.DisableRedZone)
@@ -429,7 +442,6 @@ static const char *getActionName(frontend::ActionKind Kind) {
   case frontend::PrintDeclContext:       return "-print-decl-contexts";
   case frontend::PrintPreamble:          return "-print-preamble";
   case frontend::PrintPreprocessedInput: return "-E";
-  case frontend::PubnamesDump:           return "-pubnames-dump";
   case frontend::RewriteMacros:          return "-rewrite-macros";
   case frontend::RewriteObjC:            return "-rewrite-objc";
   case frontend::RewriteTest:            return "-rewrite-test";
@@ -663,6 +675,8 @@ static void LangOptsToArgs(const LangOptions &Opts, ToArgsList &Res) {
     Res.push_back("-fno-operator-names");
   if (Opts.PascalStrings)
     Res.push_back("-fpascal-strings");
+  if (Opts.BoundsChecking > 0)
+    Res.push_back("-fbounds-checking=" + llvm::utostr(Opts.BoundsChecking));
   if (Opts.CatchUndefined)
     Res.push_back("-fcatch-undefined-behavior");
   if (Opts.AddressSanitizer)
@@ -901,7 +915,7 @@ void CompilerInvocation::toArgs(std::vector<std::string> &Res) {
 //===----------------------------------------------------------------------===//
 
 using namespace clang::driver;
-using namespace clang::driver::cc1options;
+using namespace clang::driver::options;
 
 //
 
@@ -910,14 +924,66 @@ static unsigned getOptimizationLevel(ArgList &Args, InputKind IK,
   unsigned DefaultOpt = 0;
   if (IK == IK_OpenCL && !Args.hasArg(OPT_cl_opt_disable))
     DefaultOpt = 2;
-  // -Os/-Oz implies -O2
-  return (Args.hasArg(OPT_Os) || Args.hasArg (OPT_Oz)) ? 2 :
-    Args.getLastArgIntValue(OPT_O, DefaultOpt, Diags);
+
+  if (Arg *A = Args.getLastArg(options::OPT_O_Group)) {
+    if (A->getOption().matches(options::OPT_O0))
+      return 0;
+
+    assert (A->getOption().matches(options::OPT_O));
+
+    llvm::StringRef S(A->getValue(Args));
+    if (S == "s" || S == "z" || S.empty())
+      return 2;
+
+    return Args.getLastArgIntValue(OPT_O, DefaultOpt, Diags);
+  }
+
+  return DefaultOpt;
+}
+
+static unsigned getOptimizationLevelSize(ArgList &Args, InputKind IK,
+                                         DiagnosticsEngine &Diags) {
+  if (Arg *A = Args.getLastArg(options::OPT_O_Group)) {
+    if (A->getOption().matches(options::OPT_O)) {
+      switch (A->getValue(Args)[0]) {
+      default:
+        return 0;
+      case 's':
+        return 1;
+      case 'z':
+        return 2;
+      }
+    }
+  }
+  return 0;
+}
+
+static void addWarningArgs(ArgList &Args, std::vector<std::string> &Warnings) {
+  for (arg_iterator I = Args.filtered_begin(OPT_W_Group),
+         E = Args.filtered_end(); I != E; ++I) {
+    Arg *A = *I;
+    // If the argument is a pure flag, add its name (minus the "-W" at the beginning)
+    // to the warning list. Else, add its value (for the OPT_W case).
+    if (A->getOption().getKind() == Option::FlagClass) {
+      Warnings.push_back(A->getOption().getName().substr(2));
+    } else {
+      for (unsigned Idx = 0, End = A->getNumValues();
+           Idx < End; ++Idx) {
+        StringRef V = A->getValue(Args, Idx);
+        // "-Wl," and such are not warning options.
+        // FIXME: Should be handled by putting these in separate flags.
+        if (V.startswith("l,") || V.startswith("a,") || V.startswith("p,"))
+          continue;
+
+        Warnings.push_back(V);
+      }
+    }
+  }
 }
 
 static bool ParseAnalyzerArgs(AnalyzerOptions &Opts, ArgList &Args,
                               DiagnosticsEngine &Diags) {
-  using namespace cc1options;
+  using namespace options;
   bool Success = true;
   if (Arg *A = Args.getLastArg(OPT_analyzer_store)) {
     StringRef Name = A->getValue(Args);
@@ -1067,7 +1133,7 @@ static bool ParseMigratorArgs(MigratorOptions &Opts, ArgList &Args) {
 
 static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
                              DiagnosticsEngine &Diags) {
-  using namespace cc1options;
+  using namespace options;
   bool Success = true;
 
   unsigned OptLevel = getOptimizationLevel(Args, IK, Diags);
@@ -1084,12 +1150,18 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
     : CodeGenOptions::OnlyAlwaysInlining;
   // -fno-inline-functions overrides OptimizationLevel > 1.
   Opts.NoInline = Args.hasArg(OPT_fno_inline);
-  Opts.Inlining = Args.hasArg(OPT_fno_inline_functions) ? 
+  Opts.Inlining = Args.hasArg(OPT_fno_inline_functions) ?
     CodeGenOptions::OnlyAlwaysInlining : Opts.Inlining;
 
-  Opts.DebugInfo = Args.hasArg(OPT_g);
-  Opts.LimitDebugInfo = !Args.hasArg(OPT_fno_limit_debug_info)
-    || Args.hasArg(OPT_flimit_debug_info);
+  if (Args.hasArg(OPT_gline_tables_only)) {
+    Opts.DebugInfo = CodeGenOptions::DebugLineTablesOnly;
+  } else if (Args.hasArg(OPT_g_Flag)) {
+    if (Args.hasFlag(OPT_flimit_debug_info, OPT_fno_limit_debug_info, true))
+      Opts.DebugInfo = CodeGenOptions::LimitedDebugInfo;
+    else
+      Opts.DebugInfo = CodeGenOptions::FullDebugInfo;
+  }
+
   Opts.DisableLLVMOpts = Args.hasArg(OPT_disable_llvm_optzns);
   Opts.DisableRedZone = Args.hasArg(OPT_disable_red_zone);
   Opts.ForbidGuardVariables = Args.hasArg(OPT_fforbid_guard_variables);
@@ -1100,8 +1172,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
   Opts.MergeAllConstants = !Args.hasArg(OPT_fno_merge_all_constants);
   Opts.NoCommon = Args.hasArg(OPT_fno_common);
   Opts.NoImplicitFloat = Args.hasArg(OPT_no_implicit_float);
-  Opts.OptimizeSize = Args.hasArg(OPT_Os);
-  Opts.OptimizeSize = Args.hasArg(OPT_Oz) ? 2 : Opts.OptimizeSize;
+  Opts.OptimizeSize = getOptimizationLevelSize(Args, IK, Diags);
   Opts.SimplifyLibCalls = !(Args.hasArg(OPT_fno_builtin) ||
                             Args.hasArg(OPT_ffreestanding));
   Opts.UnrollLoops = Args.hasArg(OPT_funroll_loops) ||
@@ -1186,7 +1257,7 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
 
 static void ParseDependencyOutputArgs(DependencyOutputOptions &Opts,
                                       ArgList &Args) {
-  using namespace cc1options;
+  using namespace options;
   Opts.OutputFile = Args.getLastArgValue(OPT_dependency_file);
   Opts.Targets = Args.getAllArgValues(OPT_MT);
   Opts.IncludeSystemHeaders = Args.hasArg(OPT_sys_header_deps);
@@ -1199,7 +1270,7 @@ static void ParseDependencyOutputArgs(DependencyOutputOptions &Opts,
 
 bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
                                 DiagnosticsEngine *Diags) {
-  using namespace cc1options;
+  using namespace options;
   bool Success = true;
 
   Opts.DiagnosticLogFile = Args.getLastArgValue(OPT_diagnostic_log_file);
@@ -1296,16 +1367,7 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   }
   Opts.MessageLength = Args.getLastArgIntValue(OPT_fmessage_length, 0, Diags);
   Opts.DumpBuildInformation = Args.getLastArgValue(OPT_dump_build_information);
-
-  for (arg_iterator it = Args.filtered_begin(OPT_W),
-         ie = Args.filtered_end(); it != ie; ++it) {
-    StringRef V = (*it)->getValue(Args);
-    // "-Wl," and such are not warnings options.
-    if (V.startswith("l,") || V.startswith("a,") || V.startswith("p,"))
-      continue;
-
-    Opts.Warnings.push_back(V);
-  }
+  addWarningArgs(Args, Opts.Warnings);
 
   return Success;
 }
@@ -1316,7 +1378,7 @@ static void ParseFileSystemArgs(FileSystemOptions &Opts, ArgList &Args) {
 
 static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
                                    DiagnosticsEngine &Diags) {
-  using namespace cc1options;
+  using namespace options;
   Opts.ProgramAction = frontend::ParseSyntaxOnly;
   if (const Arg *A = Args.getLastArg(OPT_Action_Group)) {
     switch (A->getOption().getID()) {
@@ -1369,8 +1431,6 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
       Opts.ProgramAction = frontend::PrintPreamble; break;
     case OPT_E:
       Opts.ProgramAction = frontend::PrintPreprocessedInput; break;
-    case OPT_pubnames_dump:
-      Opts.ProgramAction = frontend::PubnamesDump; break;
     case OPT_rewrite_macros:
       Opts.ProgramAction = frontend::RewriteMacros; break;
     case OPT_rewrite_objc:
@@ -1538,7 +1598,7 @@ std::string CompilerInvocation::GetResourcesPath(const char *Argv0,
 }
 
 static void ParseHeaderSearchArgs(HeaderSearchOptions &Opts, ArgList &Args) {
-  using namespace cc1options;
+  using namespace options;
   Opts.Sysroot = Args.getLastArgValue(OPT_isysroot, "/");
   Opts.Verbose = Args.hasArg(OPT_v);
   Opts.UseBuiltinIncludes = !Args.hasArg(OPT_nobuiltininc);
@@ -1884,7 +1944,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.ConstexprCallDepth = Args.getLastArgIntValue(OPT_fconstexpr_depth, 512,
                                                     Diags);
   Opts.DelayedTemplateParsing = Args.hasArg(OPT_fdelayed_template_parsing);
-  Opts.NumLargeByValueCopy = Args.getLastArgIntValue(OPT_Wlarge_by_value_copy,
+  Opts.NumLargeByValueCopy = Args.getLastArgIntValue(OPT_Wlarge_by_value_copy_EQ,
                                                     0, Diags);
   Opts.MSBitfields = Args.hasArg(OPT_mms_bitfields);
   Opts.NeXTRuntime = !Args.hasArg(OPT_fgnu_runtime);
@@ -1895,9 +1955,13 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
     Opts.ObjCNonFragileABI2 = true;
   Opts.ObjCDefaultSynthProperties =
     Args.hasArg(OPT_fobjc_default_synthesize_properties);
-  Opts.CatchUndefined = Args.hasArg(OPT_fcatch_undefined_behavior);
+  Opts.BoundsChecking = 0;
+  if ((Opts.CatchUndefined = Args.hasArg(OPT_fcatch_undefined_behavior)))
+    Opts.BoundsChecking = 5;
+  Opts.BoundsChecking = Args.getLastArgIntValue(OPT_fbounds_checking_EQ,
+                                                Opts.BoundsChecking, Diags);
   Opts.EmitAllDecls = Args.hasArg(OPT_femit_all_decls);
-  Opts.PackStruct = Args.getLastArgIntValue(OPT_fpack_struct, 0, Diags);
+  Opts.PackStruct = Args.getLastArgIntValue(OPT_fpack_struct_EQ, 0, Diags);
   Opts.PICLevel = Args.getLastArgIntValue(OPT_pic_level, 0, Diags);
   Opts.PIELevel = Args.getLastArgIntValue(OPT_pie_level, 0, Diags);
   Opts.Static = Args.hasArg(OPT_static_define);
@@ -1929,7 +1993,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   // FIXME: Eliminate this dependency.
   unsigned Opt = getOptimizationLevel(Args, IK, Diags);
   Opts.Optimize = Opt != 0;
-  Opts.OptimizeSize = Args.hasArg(OPT_Os) || Args.hasArg(OPT_Oz);
+  Opts.OptimizeSize = getOptimizationLevelSize(Args, IK, Diags);
 
   // This is the __NO_INLINE__ define, which just depends on things like the
   // optimization level and -fno-inline, not actually whether the backend has
@@ -1953,7 +2017,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
 static void ParsePreprocessorArgs(PreprocessorOptions &Opts, ArgList &Args,
                                   FileManager &FileMgr,
                                   DiagnosticsEngine &Diags) {
-  using namespace cc1options;
+  using namespace options;
   Opts.ImplicitPCHInclude = Args.getLastArgValue(OPT_include_pch);
   Opts.ImplicitPTHInclude = Args.getLastArgValue(OPT_include_pth);
   if (const Arg *A = Args.getLastArg(OPT_token_cache))
@@ -2055,7 +2119,7 @@ static void ParsePreprocessorArgs(PreprocessorOptions &Opts, ArgList &Args,
 
 static void ParsePreprocessorOutputArgs(PreprocessorOutputOptions &Opts,
                                         ArgList &Args) {
-  using namespace cc1options;
+  using namespace options;
   Opts.ShowCPP = !Args.hasArg(OPT_dM);
   Opts.ShowComments = Args.hasArg(OPT_C);
   Opts.ShowLineMarkers = !Args.hasArg(OPT_P);
@@ -2064,7 +2128,7 @@ static void ParsePreprocessorOutputArgs(PreprocessorOutputOptions &Opts,
 }
 
 static void ParseTargetArgs(TargetOptions &Opts, ArgList &Args) {
-  using namespace cc1options;
+  using namespace options;
   Opts.ABI = Args.getLastArgValue(OPT_target_abi);
   Opts.CXXABI = Args.getLastArgValue(OPT_cxx_abi);
   Opts.CPU = Args.getLastArgValue(OPT_target_cpu);
@@ -2086,7 +2150,7 @@ bool CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
   bool Success = true;
 
   // Parse the arguments.
-  OwningPtr<OptTable> Opts(createCC1OptTable());
+  OwningPtr<OptTable> Opts(createDriverOptTable());
   unsigned MissingArgIndex, MissingArgCount;
   OwningPtr<InputArgList> Args(
     Opts->ParseArgs(ArgBegin, ArgEnd,MissingArgIndex, MissingArgCount));
@@ -2103,6 +2167,15 @@ bool CompilerInvocation::CreateFromArgs(CompilerInvocation &Res,
          ie = Args->filtered_end(); it != ie; ++it) {
     Diags.Report(diag::err_drv_unknown_argument) << (*it)->getAsString(*Args);
     Success = false;
+  }
+
+  // Issue errors on arguments that are not valid for CC1.
+  for (ArgList::iterator I = Args->begin(), E = Args->end();
+       I != E; ++I) {
+    if (!(*I)->getOption().isCC1Option()) {
+      Diags.Report(diag::err_drv_unknown_argument) << (*I)->getAsString(*Args);
+      Success = false;
+    }
   }
 
   Success = ParseAnalyzerArgs(Res.getAnalyzerOpts(), *Args, Diags) && Success;

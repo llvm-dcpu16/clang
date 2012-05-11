@@ -90,7 +90,8 @@ Parser::ParseTemplateDeclarationOrSpecialization(unsigned Context,
 
   // Tell the action that names should be checked in the context of
   // the declaration to come.
-  ParsingDeclRAIIObject ParsingTemplateParams(*this);
+  ParsingDeclRAIIObject
+    ParsingTemplateParams(*this, ParsingDeclRAIIObject::NoParent);
 
   // Parse multiple levels of template headers within this template
   // parameter scope, e.g.,
@@ -213,10 +214,11 @@ Parser::ParseSingleDeclarationAfterTemplate(
     return ParseUsingDirectiveOrDeclaration(Context, TemplateInfo, DeclEnd,
                                             prefixAttrs);
 
-  // Parse the declaration specifiers, stealing the accumulated
-  // diagnostics from the template parameters.
+  // Parse the declaration specifiers, stealing any diagnostics from
+  // the template parameters.
   ParsingDeclSpec DS(*this, &DiagsFromTParams);
 
+  // Move the attributes from the prefix into the DS.
   DS.takeAttributesFrom(prefixAttrs);
 
   ParseDeclarationSpecifiers(DS, TemplateInfo, AS,
@@ -259,7 +261,7 @@ Parser::ParseSingleDeclarationAfterTemplate(
     }
 
     // Eat the semi colon after the declaration.
-    ExpectAndConsume(tok::semi, diag::err_expected_semi_declaration);
+    ExpectAndConsumeSemi(diag::err_expected_semi_declaration);
     if (LateParsedAttrs.size() > 0)
       ParseLexedAttributeList(LateParsedAttrs, ThisDecl, true, false);
     DeclaratorInfo.complete(ThisDecl);
@@ -309,18 +311,19 @@ bool Parser::ParseTemplateParameters(unsigned Depth,
   LAngleLoc = ConsumeToken();
 
   // Try to parse the template parameter list.
-  if (Tok.is(tok::greater))
+  bool Failed = false;
+  if (!Tok.is(tok::greater) && !Tok.is(tok::greatergreater))
+    Failed = ParseTemplateParameterList(Depth, TemplateParams);
+
+  if (Tok.is(tok::greatergreater)) {
+    Tok.setKind(tok::greater);
+    RAngleLoc = Tok.getLocation();
+    Tok.setLocation(Tok.getLocation().getLocWithOffset(1));
+  } else if (Tok.is(tok::greater))
     RAngleLoc = ConsumeToken();
-  else if (ParseTemplateParameterList(Depth, TemplateParams)) {
-    if (Tok.is(tok::greatergreater)) {
-      Tok.setKind(tok::greater);
-      Tok.setLocation(Tok.getLocation().getLocWithOffset(1));
-    } else if (Tok.is(tok::greater))
-      RAngleLoc = ConsumeToken();
-    else {
-      Diag(Tok.getLocation(), diag::err_expected_greater);
-      return true;
-    }
+  else if (Failed) {
+    Diag(Tok.getLocation(), diag::err_expected_greater);
+    return true;
   }
   return false;
 }
@@ -356,10 +359,8 @@ Parser::ParseTemplateParameterList(unsigned Depth,
       // Somebody probably forgot to close the template. Skip ahead and
       // try to get out of the expression. This error is currently
       // subsumed by whatever goes on in ParseTemplateParameter.
-      // TODO: This could match >>, and it would be nice to avoid those
-      // silly errors with template <vec<T>>.
       Diag(Tok.getLocation(), diag::err_expected_comma_greater);
-      SkipUntil(tok::greater, true, true);
+      SkipUntil(tok::comma, tok::greater, tok::greatergreater, true, true);
       return false;
     }
   }
@@ -607,10 +608,7 @@ Parser::ParseTemplateTemplateParameter(unsigned Depth, unsigned Position) {
     if (DefaultArg.isInvalid()) {
       Diag(Tok.getLocation(), 
            diag::err_default_template_template_parameter_not_template);
-      static const tok::TokenKind EndToks[] = { 
-        tok::comma, tok::greater, tok::greatergreater
-      };
-      SkipUntil(EndToks, 3, true, true);
+      SkipUntil(tok::comma, tok::greater, tok::greatergreater, true, true);
     }
   }
   
@@ -656,6 +654,7 @@ Parser::ParseNonTypeTemplateParameter(unsigned Depth, unsigned Position) {
     //   end of the template-parameter-list rather than a greater-than
     //   operator.
     GreaterThanIsOperatorScope G(GreaterThanIsOperator, false);
+    EnterExpressionEvaluationContext Unevaluated(Actions, Sema::Unevaluated);
 
     DefaultArg = ParseAssignmentExpression();
     if (DefaultArg.isInvalid())
@@ -842,7 +841,7 @@ bool Parser::AnnotateTemplateIdToken(TemplateTy Template, TemplateNameKind TNK,
     // later.
     Tok.setKind(tok::annot_template_id);
     TemplateIdAnnotation *TemplateId
-      = TemplateIdAnnotation::Allocate(TemplateArgs.size());
+      = TemplateIdAnnotation::Allocate(TemplateArgs.size(), TemplateIds);
     TemplateId->TemplateNameLoc = TemplateNameLoc;
     if (TemplateName.getKind() == UnqualifiedId::IK_Identifier) {
       TemplateId->Name = TemplateName.Identifier;
@@ -1135,7 +1134,8 @@ Decl *Parser::ParseExplicitInstantiation(unsigned Context,
                                          SourceLocation &DeclEnd,
                                          AccessSpecifier AS) {
   // This isn't really required here.
-  ParsingDeclRAIIObject ParsingTemplateParams(*this);
+  ParsingDeclRAIIObject
+    ParsingTemplateParams(*this, ParsingDeclRAIIObject::NoParent);
 
   return ParseSingleDeclarationAfterTemplate(Context,
                                              ParsedTemplateInfo(ExternLoc,

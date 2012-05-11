@@ -27,6 +27,7 @@
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/StmtVisitor.h"
+#include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Analysis/AnalysisContext.h"
 #include "clang/Analysis/CFG.h"
 #include "clang/Analysis/Analyses/ReachableCode.h"
@@ -42,7 +43,9 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
 #include <algorithm>
+#include <iterator>
 #include <vector>
+#include <deque>
 
 using namespace clang;
 
@@ -438,9 +441,14 @@ static bool SuggestInitializationFixit(Sema &S, const VarDecl *VD) {
     return false;
   
   // Suggest possible initialization (if any).
-  const char *Init = S.getFixItZeroInitializerForType(VariableTy);
-  if (!Init)
+  std::string Init = S.getFixItZeroInitializerForType(VariableTy);
+  if (Init.empty())
     return false;
+
+  // Don't suggest a fixit inside macros.
+  if (VD->getLocEnd().isMacroID())
+    return false;
+
   SourceLocation Loc = S.PP.getLocForEndOfToken(VD->getLocEnd());
   
   S.Diag(Loc, diag::note_var_fixit_add_initialization) << VD->getDeclName()
@@ -456,44 +464,36 @@ static bool SuggestInitializationFixit(Sema &S, const VarDecl *VD) {
 static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
                                      const Expr *E, bool isAlwaysUninit,
                                      bool alwaysReportSelfInit = false) {
-  bool isSelfInit = false;
 
   if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E)) {
-    if (isAlwaysUninit) {
-      // Inspect the initializer of the variable declaration which is
-      // being referenced prior to its initialization. We emit
-      // specialized diagnostics for self-initialization, and we
-      // specifically avoid warning about self references which take the
-      // form of:
-      //
-      //   int x = x;
-      //
-      // This is used to indicate to GCC that 'x' is intentionally left
-      // uninitialized. Proven code paths which access 'x' in
-      // an uninitialized state after this will still warn.
-      //
-      // TODO: Should we suppress maybe-uninitialized warnings for
-      // variables initialized in this way?
-      if (const Expr *Initializer = VD->getInit()) {
-        if (!alwaysReportSelfInit && DRE == Initializer->IgnoreParenImpCasts())
-          return false;
+    // Inspect the initializer of the variable declaration which is
+    // being referenced prior to its initialization. We emit
+    // specialized diagnostics for self-initialization, and we
+    // specifically avoid warning about self references which take the
+    // form of:
+    //
+    //   int x = x;
+    //
+    // This is used to indicate to GCC that 'x' is intentionally left
+    // uninitialized. Proven code paths which access 'x' in
+    // an uninitialized state after this will still warn.
+    if (const Expr *Initializer = VD->getInit()) {
+      if (!alwaysReportSelfInit && DRE == Initializer->IgnoreParenImpCasts())
+        return false;
 
-        ContainsReference CR(S.Context, DRE);
-        CR.Visit(const_cast<Expr*>(Initializer));
-        isSelfInit = CR.doesContainReference();
-      }
-      if (isSelfInit) {
+      ContainsReference CR(S.Context, DRE);
+      CR.Visit(const_cast<Expr*>(Initializer));
+      if (CR.doesContainReference()) {
         S.Diag(DRE->getLocStart(),
                diag::warn_uninit_self_reference_in_init)
-        << VD->getDeclName() << VD->getLocation() << DRE->getSourceRange();
-      } else {
-        S.Diag(DRE->getLocStart(), diag::warn_uninit_var)
-          << VD->getDeclName() << DRE->getSourceRange();
+          << VD->getDeclName() << VD->getLocation() << DRE->getSourceRange();
+        return true;
       }
-    } else {
-      S.Diag(DRE->getLocStart(), diag::warn_maybe_uninit_var)
-        << VD->getDeclName() << DRE->getSourceRange();
     }
+
+    S.Diag(DRE->getLocStart(), isAlwaysUninit ? diag::warn_uninit_var
+                                              : diag::warn_maybe_uninit_var)
+      << VD->getDeclName() << DRE->getSourceRange();
   } else {
     const BlockExpr *BE = cast<BlockExpr>(E);
     if (VD->getType()->isBlockPointerType() &&
@@ -510,11 +510,194 @@ static bool DiagnoseUninitializedUse(Sema &S, const VarDecl *VD,
   // Report where the variable was declared when the use wasn't within
   // the initializer of that declaration & we didn't already suggest
   // an initialization fixit.
-  if (!isSelfInit && !SuggestInitializationFixit(S, VD))
+  if (!SuggestInitializationFixit(S, VD))
     S.Diag(VD->getLocStart(), diag::note_uninit_var_def)
       << VD->getDeclName();
 
   return true;
+}
+
+namespace {
+  class FallthroughMapper : public RecursiveASTVisitor<FallthroughMapper> {
+  public:
+    FallthroughMapper(Sema &S)
+      : FoundSwitchStatements(false),
+        S(S) {
+    }
+
+    bool foundSwitchStatements() const { return FoundSwitchStatements; }
+
+    void markFallthroughVisited(const AttributedStmt *Stmt) {
+      bool Found = FallthroughStmts.erase(Stmt);
+      assert(Found);
+      (void)Found;
+    }
+
+    typedef llvm::SmallPtrSet<const AttributedStmt*, 8> AttrStmts;
+
+    const AttrStmts &getFallthroughStmts() const {
+      return FallthroughStmts;
+    }
+
+    bool checkFallThroughIntoBlock(const CFGBlock &B, int &AnnotatedCnt) {
+      int UnannotatedCnt = 0;
+      AnnotatedCnt = 0;
+
+      std::deque<const CFGBlock*> BlockQueue;
+
+      std::copy(B.pred_begin(), B.pred_end(), std::back_inserter(BlockQueue));
+
+      while (!BlockQueue.empty()) {
+        const CFGBlock *P = BlockQueue.front();
+        BlockQueue.pop_front();
+
+        const Stmt *Term = P->getTerminator();
+        if (Term && isa<SwitchStmt>(Term))
+          continue; // Switch statement, good.
+
+        const SwitchCase *SW = dyn_cast_or_null<SwitchCase>(P->getLabel());
+        if (SW && SW->getSubStmt() == B.getLabel() && P->begin() == P->end())
+          continue; // Previous case label has no statements, good.
+
+        if (P->pred_begin() == P->pred_end()) {  // The block is unreachable.
+          // This only catches trivially unreachable blocks.
+          for (CFGBlock::const_iterator ElIt = P->begin(), ElEnd = P->end();
+               ElIt != ElEnd; ++ElIt) {
+            if (const CFGStmt *CS = ElIt->getAs<CFGStmt>()){
+              if (const AttributedStmt *AS = asFallThroughAttr(CS->getStmt())) {
+                S.Diag(AS->getLocStart(),
+                       diag::warn_fallthrough_attr_unreachable);
+                markFallthroughVisited(AS);
+                ++AnnotatedCnt;
+              }
+              // Don't care about other unreachable statements.
+            }
+          }
+          // If there are no unreachable statements, this may be a special
+          // case in CFG:
+          // case X: {
+          //    A a;  // A has a destructor.
+          //    break;
+          // }
+          // // <<<< This place is represented by a 'hanging' CFG block.
+          // case Y:
+          continue;
+        }
+
+        const Stmt *LastStmt = getLastStmt(*P);
+        if (const AttributedStmt *AS = asFallThroughAttr(LastStmt)) {
+          markFallthroughVisited(AS);
+          ++AnnotatedCnt;
+          continue; // Fallthrough annotation, good.
+        }
+
+        if (!LastStmt) { // This block contains no executable statements.
+          // Traverse its predecessors.
+          std::copy(P->pred_begin(), P->pred_end(),
+                    std::back_inserter(BlockQueue));
+          continue;
+        }
+
+        ++UnannotatedCnt;
+      }
+      return !!UnannotatedCnt;
+    }
+
+    // RecursiveASTVisitor setup.
+    bool shouldWalkTypesOfTypeLocs() const { return false; }
+
+    bool VisitAttributedStmt(AttributedStmt *S) {
+      if (asFallThroughAttr(S))
+        FallthroughStmts.insert(S);
+      return true;
+    }
+
+    bool VisitSwitchStmt(SwitchStmt *S) {
+      FoundSwitchStatements = true;
+      return true;
+    }
+
+  private:
+
+    static const AttributedStmt *asFallThroughAttr(const Stmt *S) {
+      if (const AttributedStmt *AS = dyn_cast_or_null<AttributedStmt>(S)) {
+        if (hasSpecificAttr<FallThroughAttr>(AS->getAttrs()))
+          return AS;
+      }
+      return 0;
+    }
+
+    static const Stmt *getLastStmt(const CFGBlock &B) {
+      if (const Stmt *Term = B.getTerminator())
+        return Term;
+      for (CFGBlock::const_reverse_iterator ElemIt = B.rbegin(),
+                                            ElemEnd = B.rend();
+                                            ElemIt != ElemEnd; ++ElemIt) {
+        if (const CFGStmt *CS = ElemIt->getAs<CFGStmt>())
+          return CS->getStmt();
+      }
+      // Workaround to detect a statement thrown out by CFGBuilder:
+      //   case X: {} case Y:
+      //   case X: ; case Y:
+      if (const SwitchCase *SW = dyn_cast_or_null<SwitchCase>(B.getLabel()))
+        if (!isa<SwitchCase>(SW->getSubStmt()))
+          return SW->getSubStmt();
+
+      return 0;
+    }
+
+    bool FoundSwitchStatements;
+    AttrStmts FallthroughStmts;
+    Sema &S;
+  };
+}
+
+static void DiagnoseSwitchLabelsFallthrough(Sema &S, AnalysisDeclContext &AC) {
+  FallthroughMapper FM(S);
+  FM.TraverseStmt(AC.getBody());
+
+  if (!FM.foundSwitchStatements())
+    return;
+
+  CFG *Cfg = AC.getCFG();
+
+  if (!Cfg)
+    return;
+
+  int AnnotatedCnt;
+
+  for (CFG::reverse_iterator I = Cfg->rbegin(), E = Cfg->rend(); I != E; ++I) {
+    const CFGBlock &B = **I;
+    const Stmt *Label = B.getLabel();
+
+    if (!Label || !isa<SwitchCase>(Label))
+      continue;
+
+    if (!FM.checkFallThroughIntoBlock(B, AnnotatedCnt))
+      continue;
+
+    S.Diag(Label->getLocStart(), diag::warn_unannotated_fallthrough);
+
+    if (!AnnotatedCnt) {
+      SourceLocation L = Label->getLocStart();
+      if (L.isMacroID())
+        continue;
+      if (S.getLangOpts().CPlusPlus0x) {
+        S.Diag(L, diag::note_insert_fallthrough_fixit) <<
+          FixItHint::CreateInsertion(L, "[[clang::fallthrough]]; ");
+      }
+      S.Diag(L, diag::note_insert_break_fixit) <<
+        FixItHint::CreateInsertion(L, "break; ");
+    }
+  }
+
+  const FallthroughMapper::AttrStmts &Fallthroughs = FM.getFallthroughStmts();
+  for (FallthroughMapper::AttrStmts::const_iterator I = Fallthroughs.begin(),
+                                                    E = Fallthroughs.end();
+                                                    I != E; ++I) {
+    S.Diag((*I)->getLocStart(), diag::warn_fallthrough_attr_invalid_placement);
+  }
+
 }
 
 typedef std::pair<const Expr*, bool> UninitUse;
@@ -830,7 +1013,7 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
   const Stmt *Body = D->getBody();
   assert(Body);
 
-  AnalysisDeclContext AC(/* AnalysisDeclContextManager */ 0,  D, 0);
+  AnalysisDeclContext AC(/* AnalysisDeclContextManager */ 0, D);
 
   // Don't generate EH edges for CallExprs as we'd like to avoid the n^2
   // explosion for destrutors that can result and the compile time hit.
@@ -856,7 +1039,8 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
       .setAlwaysAdd(Stmt::CStyleCastExprClass)
       .setAlwaysAdd(Stmt::DeclRefExprClass)
       .setAlwaysAdd(Stmt::ImplicitCastExprClass)
-      .setAlwaysAdd(Stmt::UnaryOperatorClass);
+      .setAlwaysAdd(Stmt::UnaryOperatorClass)
+      .setAlwaysAdd(Stmt::AttributedStmtClass);
   }
 
   // Construct the analysis context with the specified CFG build options.
@@ -966,6 +1150,11 @@ AnalysisBasedWarnings::IssueWarnings(sema::AnalysisBasedWarnings::Policy P,
                      stats.NumBlockVisits);
       }
     }
+  }
+
+  if (Diags.getDiagnosticLevel(diag::warn_unannotated_fallthrough,
+                              D->getLocStart()) != DiagnosticsEngine::Ignored) {
+    DiagnoseSwitchLabelsFallthrough(S, AC);
   }
 
   // Collect statistics about the CFG if it was built.

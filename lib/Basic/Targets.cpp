@@ -316,6 +316,8 @@ protected:
     DefineStd(Builder, "linux", Opts);
     Builder.defineMacro("__gnu_linux__");
     Builder.defineMacro("__ELF__");
+    if (Triple.getEnvironment() == llvm::Triple::ANDROIDEABI)
+      Builder.defineMacro("__ANDROID__", "1");
     if (Opts.POSIXThreads)
       Builder.defineMacro("_REENTRANT");
     if (Opts.CPlusPlus)
@@ -365,7 +367,7 @@ protected:
     DefineStd(Builder, "unix", Opts);
     Builder.defineMacro("__ELF__");
     if (Opts.POSIXThreads)
-      Builder.defineMacro("_POSIX_THREADS");
+      Builder.defineMacro("_REENTRANT");
   }
 public:
   OpenBSDTargetInfo(const std::string &triple)
@@ -1642,18 +1644,16 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
   case CK_Corei7AVX:
   case CK_CoreAVXi:
     setFeatureEnabled(Features, "mmx", true);
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx", true);
     setFeatureEnabled(Features, "aes", true);
-    //setFeatureEnabled(Features, "avx", true);
     break;
   case CK_CoreAVX2:
     setFeatureEnabled(Features, "mmx", true);
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx2", true);
     setFeatureEnabled(Features, "aes", true);
     setFeatureEnabled(Features, "lzcnt", true);
     setFeatureEnabled(Features, "bmi", true);
     setFeatureEnabled(Features, "bmi2", true);
-    //setFeatureEnabled(Features, "avx2", true);
     break;
   case CK_K6:
   case CK_WinChipC6:
@@ -1699,7 +1699,7 @@ void X86TargetInfo::getDefaultFeatures(llvm::StringMap<bool> &Features) const {
     setFeatureEnabled(Features, "sse4a", true);
   case CK_BDVER1:
   case CK_BDVER2:
-    setFeatureEnabled(Features, "sse4", true);
+    setFeatureEnabled(Features, "avx", true);
     setFeatureEnabled(Features, "sse4a", true);
     setFeatureEnabled(Features, "aes", true);
     break;
@@ -3015,8 +3015,8 @@ public:
   HexagonTargetInfo(const std::string& triple) : TargetInfo(triple)  {
     BigEndian = false;
     DescriptionString = ("e-p:32:32:32-"
-                         "i64:64:64-i32:32:32-"
-                         "i16:16:16-i1:32:32-a:0:0");
+                         "i64:64:64-i32:32:32-i16:16:16-i1:32:32"
+                         "f64:64:64-f32:32:32-a0:0-n32");
 
     // {} in inline assembly are packet specifiers, not assembly variant
     // specifiers.
@@ -3057,6 +3057,7 @@ public:
       .Case("hexagonv2", "2")
       .Case("hexagonv3", "3")
       .Case("hexagonv4", "4")
+      .Case("hexagonv5", "5")
       .Default(0);
   }
 
@@ -3109,6 +3110,14 @@ void HexagonTargetInfo::getTargetDefines(const LangOptions &Opts,
     if(Opts.HexagonQdsp6Compat) {
       Builder.defineMacro("__QDSP6_V4__");
       Builder.defineMacro("__QDSP6_ARCH__", "4");
+    }
+  }
+  else if(CPU == "hexagonv5") {
+    Builder.defineMacro("__HEXAGON_V5__");
+    Builder.defineMacro("__HEXAGON_ARCH__", "5");
+    if(Opts.HexagonQdsp6Compat) {
+      Builder.defineMacro("__QDSP6_V5__");
+      Builder.defineMacro("__QDSP6_ARCH__", "5");
     }
   }
 }
@@ -3521,8 +3530,11 @@ protected:
   std::string ABI;
 
 public:
-  MipsTargetInfoBase(const std::string& triple, const std::string& ABIStr)
+  MipsTargetInfoBase(const std::string& triple,
+                     const std::string& ABIStr,
+                     const std::string& CPUStr)
     : TargetInfo(triple),
+      CPU(CPUStr),
       SoftFloat(false), SingleFloat(false),
       ABI(ABIStr)
   {}
@@ -3615,7 +3627,10 @@ public:
   virtual bool setFeatureEnabled(llvm::StringMap<bool> &Features,
                                  StringRef Name,
                                  bool Enabled) const {
-    if (Name == "soft-float" || Name == "single-float") {
+    if (Name == "soft-float" || Name == "single-float" ||
+        Name == "o32" || Name == "n32" || Name == "n64" || Name == "eabi" ||
+        Name == "mips32" || Name == "mips32r2" ||
+        Name == "mips64" || Name == "mips64r2") {
       Features[Name] = Enabled;
       return true;
     }
@@ -3647,7 +3662,7 @@ public:
 class Mips32TargetInfoBase : public MipsTargetInfoBase {
 public:
   Mips32TargetInfoBase(const std::string& triple) :
-    MipsTargetInfoBase(triple, "o32") {
+    MipsTargetInfoBase(triple, "o32", "mips32") {
     SizeType = UnsignedInt;
     PtrDiffType = SignedInt;
   }
@@ -3751,7 +3766,7 @@ class Mips64TargetInfoBase : public MipsTargetInfoBase {
   virtual void SetDescriptionString(const std::string &Name) = 0;
 public:
   Mips64TargetInfoBase(const std::string& triple) :
-    MipsTargetInfoBase(triple, "n64") {
+    MipsTargetInfoBase(triple, "n64", "mips64") {
     LongWidth = LongAlign = 64;
     PointerWidth = PointerAlign = 64;
     LongDoubleWidth = LongDoubleAlign = 128;

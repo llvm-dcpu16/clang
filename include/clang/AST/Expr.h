@@ -581,16 +581,6 @@ public:
   /// member expression.
   static QualType findBoundMemberType(const Expr *expr);
 
-  /// \brief Result type of CanThrow().
-  enum CanThrowResult {
-    CT_Cannot,
-    CT_Dependent,
-    CT_Can
-  };
-  /// \brief Test if this expression, if evaluated, might throw, according to
-  ///        the rules of C++ [expr.unary.noexcept].
-  CanThrowResult CanThrow(ASTContext &C) const;
-
   /// IgnoreImpCasts - Skip past any implicit casts which might
   /// surround this expression.  Only skips ImplicitCastExprs.
   Expr *IgnoreImpCasts() LLVM_READONLY;
@@ -3609,6 +3599,10 @@ public:
     return LBraceLoc.isValid() && RBraceLoc.isValid();
   }
 
+  // Is this an initializer for an array of characters, initialized by a string
+  // literal or an @encode?
+  bool isStringLiteralInit() const;
+
   SourceLocation getLBraceLoc() const { return LBraceLoc; }
   void setLBraceLoc(SourceLocation Loc) { LBraceLoc = Loc; }
   SourceLocation getRBraceLoc() const { return RBraceLoc; }
@@ -4471,22 +4465,35 @@ public:
 
 /// AtomicExpr - Variadic atomic builtins: __atomic_exchange, __atomic_fetch_*,
 /// __atomic_load, __atomic_store, and __atomic_compare_exchange_*, for the
-/// similarly-named C++0x instructions.  All of these instructions take one
-/// primary pointer and at least one memory order.
+/// similarly-named C++11 instructions, and __c11 variants for <stdatomic.h>.
+/// All of these instructions take one primary pointer and at least one memory
+/// order.
 class AtomicExpr : public Expr {
 public:
-  enum AtomicOp { Load, Store, CmpXchgStrong, CmpXchgWeak, Xchg,
-                  Add, Sub, And, Or, Xor, Init };
+  enum AtomicOp {
+#define BUILTIN(ID, TYPE, ATTRS)
+#define ATOMIC_BUILTIN(ID, TYPE, ATTRS) AO ## ID,
+#include "clang/Basic/Builtins.def"
+    // Avoid trailing comma
+    BI_First = 0
+  };
+
 private:
-  enum { PTR, ORDER, VAL1, ORDER_FAIL, VAL2, END_EXPR };
+  enum { PTR, ORDER, VAL1, ORDER_FAIL, VAL2, WEAK, END_EXPR };
   Stmt* SubExprs[END_EXPR];
   unsigned NumSubExprs;
   SourceLocation BuiltinLoc, RParenLoc;
   AtomicOp Op;
 
+  friend class ASTStmtReader;
+
 public:
   AtomicExpr(SourceLocation BLoc, Expr **args, unsigned nexpr, QualType t,
              AtomicOp op, SourceLocation RP);
+
+  /// \brief Determine the number of arguments the specified atomic builtin
+  /// should have.
+  static unsigned getNumSubExprs(AtomicOp Op);
 
   /// \brief Build an empty AtomicExpr.
   explicit AtomicExpr(EmptyShell Empty) : Expr(AtomicExprClass, Empty) { }
@@ -4494,50 +4501,32 @@ public:
   Expr *getPtr() const {
     return cast<Expr>(SubExprs[PTR]);
   }
-  void setPtr(Expr *E) {
-    SubExprs[PTR] = E;
-  }
   Expr *getOrder() const {
     return cast<Expr>(SubExprs[ORDER]);
   }
-  void setOrder(Expr *E) {
-    SubExprs[ORDER] = E;
-  }
   Expr *getVal1() const {
-    if (Op == Init)
+    if (Op == AO__c11_atomic_init)
       return cast<Expr>(SubExprs[ORDER]);
-    assert(NumSubExprs >= 3);
+    assert(NumSubExprs > VAL1);
     return cast<Expr>(SubExprs[VAL1]);
   }
-  void setVal1(Expr *E) {
-    if (Op == Init) {
-      SubExprs[ORDER] = E;
-      return;
-    }
-    assert(NumSubExprs >= 3);
-    SubExprs[VAL1] = E;
-  }
   Expr *getOrderFail() const {
-    assert(NumSubExprs == 5);
+    assert(NumSubExprs > ORDER_FAIL);
     return cast<Expr>(SubExprs[ORDER_FAIL]);
   }
-  void setOrderFail(Expr *E) {
-    assert(NumSubExprs == 5);
-    SubExprs[ORDER_FAIL] = E;
-  }
   Expr *getVal2() const {
-    assert(NumSubExprs == 5);
+    if (Op == AO__atomic_exchange)
+      return cast<Expr>(SubExprs[ORDER_FAIL]);
+    assert(NumSubExprs > VAL2);
     return cast<Expr>(SubExprs[VAL2]);
   }
-  void setVal2(Expr *E) {
-    assert(NumSubExprs == 5);
-    SubExprs[VAL2] = E;
+  Expr *getWeak() const {
+    assert(NumSubExprs > WEAK);
+    return cast<Expr>(SubExprs[WEAK]);
   }
 
   AtomicOp getOp() const { return Op; }
-  void setOp(AtomicOp op) { Op = op; }
   unsigned getNumSubExprs() { return NumSubExprs; }
-  void setNumSubExprs(unsigned num) { NumSubExprs = num; }
 
   Expr **getSubExprs() { return reinterpret_cast<Expr **>(SubExprs); }
 
@@ -4546,15 +4535,14 @@ public:
   }
 
   bool isCmpXChg() const {
-    return getOp() == AtomicExpr::CmpXchgStrong ||
-           getOp() == AtomicExpr::CmpXchgWeak;
+    return getOp() == AO__c11_atomic_compare_exchange_strong ||
+           getOp() == AO__c11_atomic_compare_exchange_weak ||
+           getOp() == AO__atomic_compare_exchange ||
+           getOp() == AO__atomic_compare_exchange_n;
   }
 
   SourceLocation getBuiltinLoc() const { return BuiltinLoc; }
-  void setBuiltinLoc(SourceLocation L) { BuiltinLoc = L; }
-
   SourceLocation getRParenLoc() const { return RParenLoc; }
-  void setRParenLoc(SourceLocation L) { RParenLoc = L; }
 
   SourceRange getSourceRange() const LLVM_READONLY {
     return SourceRange(BuiltinLoc, RParenLoc);

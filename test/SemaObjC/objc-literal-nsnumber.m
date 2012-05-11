@@ -76,3 +76,10 @@ NSDictionary * warn() {
                                @"date" : [NSDate date] };
   return dictionary3;
 }
+
+// rdar:// 11231426
+typedef float BOOL;
+
+BOOL radar11231426() {
+        return __objc_yes;
+}

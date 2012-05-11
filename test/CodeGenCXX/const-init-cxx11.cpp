@@ -49,6 +49,17 @@ namespace StructUnion {
 
   // CHECK: @_ZN11StructUnion1fE = global {{.*}} { i32 5 }
   D f;
+
+  union E {
+    int a;
+    void *b = &f;
+  };
+
+  // CHECK: @_ZN11StructUnion1gE = global {{.*}} @_ZN11StructUnion1fE
+  E g;
+
+  // CHECK: @_ZN11StructUnion1hE = global {{.*}} @_ZN11StructUnion1fE
+  E h = E();
 }
 
 namespace BaseClass {
@@ -91,6 +102,9 @@ namespace Array {
 
   // CHECK: @_ZN5Array1cE = constant [6 x [4 x i8]] [{{.*}} c"foo\00", [4 x i8] c"a\00\00\00", [4 x i8] c"bar\00", [4 x i8] c"xyz\00", [4 x i8] c"b\00\00\00", [4 x i8] c"123\00"]
   extern constexpr char c[6][4] = { "foo", "a", { "bar" }, { 'x', 'y', 'z' }, { "b" }, '1', '2', '3' };
+
+  // CHECK: @_ZN5Array2ucE = constant [4 x i8] c"foo\00"
+  extern constexpr unsigned char uc[] = { "foo" };
 
   struct C { constexpr C() : n(5) {} int n, m = 3 * n + 1; };
   // CHECK: @_ZN5Array5ctorsE = constant [3 x {{.*}}] [{{.*}} { i32 5, i32 16 }, {{.*}} { i32 5, i32 16 }, {{.*}} { i32 5, i32 16 }]
