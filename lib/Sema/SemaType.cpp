@@ -1205,9 +1205,20 @@ QualType Sema::BuildReferenceType(QualType T, bool SpelledAsLValue,
 static bool isArraySizeVLA(Sema &S, Expr *ArraySize, llvm::APSInt &SizeVal) {
   // If the size is an ICE, it certainly isn't a VLA. If we're in a GNU mode
   // (like gnu99, but not c99) accept any evaluatable value as an extension.
-  return S.VerifyIntegerConstantExpression(
-      ArraySize, &SizeVal, S.PDiag(), S.LangOpts.GNUMode,
-      S.PDiag(diag::ext_vla_folded_to_constant)).isInvalid();
+  class VLADiagnoser : public Sema::VerifyICEDiagnoser {
+  public:
+    VLADiagnoser() : Sema::VerifyICEDiagnoser(true) {}
+    
+    virtual void diagnoseNotICE(Sema &S, SourceLocation Loc, SourceRange SR) {
+    }
+    
+    virtual void diagnoseFold(Sema &S, SourceLocation Loc, SourceRange SR) {
+      S.Diag(Loc, diag::ext_vla_folded_to_constant) << SR;
+    }
+  } Diagnoser;
+  
+  return S.VerifyIntegerConstantExpression(ArraySize, &SizeVal, Diagnoser,
+                                           S.LangOpts.GNUMode).isInvalid();
 }
 
 
@@ -2371,34 +2382,33 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
           EPI.ConsumedArguments = ConsumedArguments.data();
 
         SmallVector<QualType, 4> Exceptions;
-        EPI.ExceptionSpecType = FTI.getExceptionSpecType();
+        SmallVector<ParsedType, 2> DynamicExceptions;
+        SmallVector<SourceRange, 2> DynamicExceptionRanges;
+        Expr *NoexceptExpr = 0;
+        
         if (FTI.getExceptionSpecType() == EST_Dynamic) {
-          Exceptions.reserve(FTI.NumExceptions);
-          for (unsigned ei = 0, ee = FTI.NumExceptions; ei != ee; ++ei) {
-            // FIXME: Preserve type source info.
-            QualType ET = S.GetTypeFromParser(FTI.Exceptions[ei].Ty);
-            // Check that the type is valid for an exception spec, and
-            // drop it if not.
-            if (!S.CheckSpecifiedExceptionType(ET, FTI.Exceptions[ei].Range))
-              Exceptions.push_back(ET);
+          // FIXME: It's rather inefficient to have to split into two vectors
+          // here.
+          unsigned N = FTI.NumExceptions;
+          DynamicExceptions.reserve(N);
+          DynamicExceptionRanges.reserve(N);
+          for (unsigned I = 0; I != N; ++I) {
+            DynamicExceptions.push_back(FTI.Exceptions[I].Ty);
+            DynamicExceptionRanges.push_back(FTI.Exceptions[I].Range);
           }
-          EPI.NumExceptions = Exceptions.size();
-          EPI.Exceptions = Exceptions.data();
         } else if (FTI.getExceptionSpecType() == EST_ComputedNoexcept) {
-          // If an error occurred, there's no expression here.
-          if (Expr *NoexceptExpr = FTI.NoexceptExpr) {
-            assert((NoexceptExpr->isTypeDependent() ||
-                    NoexceptExpr->getType()->getCanonicalTypeUnqualified() ==
-                        Context.BoolTy) &&
-                 "Parser should have made sure that the expression is boolean");
-            if (!NoexceptExpr->isValueDependent())
-              NoexceptExpr = S.VerifyIntegerConstantExpression(NoexceptExpr, 0,
-                S.PDiag(diag::err_noexcept_needs_constant_expression),
-                /*AllowFold*/ false).take();
-            EPI.NoexceptExpr = NoexceptExpr;
-          }
-        } else if (FTI.getExceptionSpecType() == EST_None &&
-                   ImplicitlyNoexcept && chunkIndex == 0) {
+          NoexceptExpr = FTI.NoexceptExpr;
+        }
+              
+        S.checkExceptionSpecification(FTI.getExceptionSpecType(),
+                                      DynamicExceptions,
+                                      DynamicExceptionRanges,
+                                      NoexceptExpr,
+                                      Exceptions,
+                                      EPI);
+        
+        if (FTI.getExceptionSpecType() == EST_None &&
+            ImplicitlyNoexcept && chunkIndex == 0) {
           // Only the outermost chunk is marked noexcept, of course.
           EPI.ExceptionSpecType = EST_BasicNoexcept;
         }
@@ -2872,6 +2882,10 @@ namespace {
     }
     void VisitObjCInterfaceTypeLoc(ObjCInterfaceTypeLoc TL) {
       TL.setNameLoc(DS.getTypeSpecTypeLoc());
+      // FIXME. We should have DS.getTypeSpecTypeEndLoc(). But, it requires
+      // addition field. What we have is good enough for dispay of location
+      // of 'fixit' on interface name.
+      TL.setNameEndLoc(DS.getLocEnd());
     }
     void VisitObjCObjectTypeLoc(ObjCObjectTypeLoc TL) {
       // Handle the base type, which might not have been written explicitly.
@@ -4044,14 +4058,12 @@ static void processTypeAttrs(TypeProcessingState &state, QualType &type,
 /// case of a reference type, the referred-to type).
 ///
 /// \param E The expression whose type is required to be complete.
-/// \param PD The partial diagnostic that will be printed out if the type cannot
-/// be completed.
+/// \param Diagnoser The object that will emit a diagnostic if the type is
+/// incomplete.
 ///
 /// \returns \c true if the type of \p E is incomplete and diagnosed, \c false
 /// otherwise.
-bool Sema::RequireCompleteExprType(Expr *E, const PartialDiagnostic &PD,
-                                   std::pair<SourceLocation,
-                                             PartialDiagnostic> Note) {
+bool Sema::RequireCompleteExprType(Expr *E, TypeDiagnoser &Diagnoser){
   QualType T = E->getType();
 
   // Fast path the case where the type is already complete.
@@ -4108,7 +4120,26 @@ bool Sema::RequireCompleteExprType(Expr *E, const PartialDiagnostic &PD,
   if (const ReferenceType *Ref = T->getAs<ReferenceType>())
     T = Ref->getPointeeType();
 
-  return RequireCompleteType(E->getExprLoc(), T, PD, Note);
+  return RequireCompleteType(E->getExprLoc(), T, Diagnoser);
+}
+
+namespace {
+  struct TypeDiagnoserDiag : Sema::TypeDiagnoser {
+    unsigned DiagID;
+    
+    TypeDiagnoserDiag(unsigned DiagID)
+      : Sema::TypeDiagnoser(DiagID == 0), DiagID(DiagID) {}
+    
+    virtual void diagnose(Sema &S, SourceLocation Loc, QualType T) {
+      if (Suppressed) return;
+      S.Diag(Loc, DiagID) << T;
+    }
+  };
+}
+
+bool Sema::RequireCompleteExprType(Expr *E, unsigned DiagID) {
+  TypeDiagnoserDiag Diagnoser(DiagID);
+  return RequireCompleteExprType(E, Diagnoser);
 }
 
 /// @brief Ensure that the type T is a complete type.
@@ -4132,11 +4163,7 @@ bool Sema::RequireCompleteExprType(Expr *E, const PartialDiagnostic &PD,
 /// @returns @c true if @p T is incomplete and a diagnostic was emitted,
 /// @c false otherwise.
 bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
-                               const PartialDiagnostic &PD,
-                               std::pair<SourceLocation, 
-                                         PartialDiagnostic> Note) {
-  unsigned diag = PD.getDiagID();
-
+                               TypeDiagnoser &Diagnoser) {
   // FIXME: Add this assertion to make sure we always get instantiation points.
   //  assert(!Loc.isInvalid() && "Invalid location in RequireCompleteType");
   // FIXME: Add this assertion to help us flush out problems with
@@ -4149,7 +4176,7 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
   NamedDecl *Def = 0;
   if (!T->isIncompleteType(&Def)) {
     // If we know about the definition but it is not visible, complain.
-    if (diag != 0 && Def && !LookupResult::isVisible(Def)) {
+    if (!Diagnoser.Suppressed && Def && !LookupResult::isVisible(Def)) {
       // Suppress this error outside of a SFINAE context if we've already
       // emitted the error once for this type. There's no usefulness in 
       // repeating the diagnostic.
@@ -4196,7 +4223,8 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
   // class template specialization, or an array with known size of such,
   // try to instantiate it.
   QualType MaybeTemplate = T;
-  if (const ConstantArrayType *Array = Context.getAsConstantArrayType(T))
+  while (const ConstantArrayType *Array
+           = Context.getAsConstantArrayType(MaybeTemplate))
     MaybeTemplate = Array->getElementType();
   if (const RecordType *Record = MaybeTemplate->getAs<RecordType>()) {
     if (ClassTemplateSpecializationDecl *ClassTemplateSpec
@@ -4204,7 +4232,7 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
       if (ClassTemplateSpec->getSpecializationKind() == TSK_Undeclared)
         return InstantiateClassTemplateSpecialization(Loc, ClassTemplateSpec,
                                                       TSK_ImplicitInstantiation,
-                                                      /*Complain=*/diag != 0);
+                                            /*Complain=*/!Diagnoser.Suppressed);
     } else if (CXXRecordDecl *Rec
                  = dyn_cast<CXXRecordDecl>(Record->getDecl())) {
       CXXRecordDecl *Pattern = Rec->getInstantiatedFromMemberClass();
@@ -4216,20 +4244,16 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
           return InstantiateClass(Loc, Rec, Pattern,
                                   getTemplateInstantiationArgs(Rec),
                                   TSK_ImplicitInstantiation,
-                                  /*Complain=*/diag != 0);
+                                  /*Complain=*/!Diagnoser.Suppressed);
       }
     }
   }
 
-  if (diag == 0)
+  if (Diagnoser.Suppressed)
     return true;
-    
+
   // We have an incomplete type. Produce a diagnostic.
-  Diag(Loc, PD) << T;
-    
-  // If we have a note, produce it.
-  if (!Note.first.isInvalid())
-    Diag(Note.first, Note.second);
+  Diagnoser.diagnose(*this, Loc, T);
     
   // If the type was a forward declaration of a class/struct/union
   // type, produce a note.
@@ -4247,15 +4271,9 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
 }
 
 bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
-                               const PartialDiagnostic &PD) {
-  return RequireCompleteType(Loc, T, PD, 
-                             std::make_pair(SourceLocation(), PDiag(0)));
-}
-  
-bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
-                               unsigned DiagID) {
-  return RequireCompleteType(Loc, T, PDiag(DiagID),
-                             std::make_pair(SourceLocation(), PDiag(0)));
+                               unsigned DiagID) {  
+  TypeDiagnoserDiag Diagnoser(DiagID);
+  return RequireCompleteType(Loc, T, Diagnoser);
 }
 
 /// @brief Ensure that the type T is a literal type.
@@ -4272,13 +4290,12 @@ bool Sema::RequireCompleteType(SourceLocation Loc, QualType T,
 ///
 /// @param T  The type that this routine is examining for literalness.
 ///
-/// @param PD The partial diagnostic that will be printed out if T is not a
-/// literal type.
+/// @param Diagnoser Emits a diagnostic if T is not a literal type.
 ///
 /// @returns @c true if @p T is not a literal type and a diagnostic was emitted,
 /// @c false otherwise.
 bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
-                              const PartialDiagnostic &PD) {
+                              TypeDiagnoser &Diagnoser) {
   assert(!T->isDependentType() && "type should not be dependent");
 
   QualType ElemType = Context.getBaseElementType(T);
@@ -4287,10 +4304,10 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
   if (T->isLiteralType())
     return false;
 
-  if (PD.getDiagID() == 0)
+  if (Diagnoser.Suppressed)
     return true;
 
-  Diag(Loc, PD) << T;
+  Diagnoser.diagnose(*this, Loc, T);
 
   if (T->isVariableArrayType())
     return true;
@@ -4301,9 +4318,13 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
 
   const CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
 
-  // FIXME: Better diagnostic for incomplete class?
-  if (!RD->isCompleteDefinition())
+  // A partially-defined class type can't be a literal type, because a literal
+  // class type must have a trivial destructor (which can't be checked until
+  // the class definition is complete).
+  if (!RD->isCompleteDefinition()) {
+    RequireCompleteType(Loc, ElemType, diag::note_non_literal_incomplete, T);
     return true;
+  }
 
   // If the class has virtual base classes, then it's not an aggregate, and
   // cannot have any constexpr constructors or a trivial default constructor,
@@ -4331,11 +4352,11 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
     }
     for (CXXRecordDecl::field_iterator I = RD->field_begin(),
          E = RD->field_end(); I != E; ++I) {
-      if (!(*I)->getType()->isLiteralType() ||
-          (*I)->getType().isVolatileQualified()) {
-        Diag((*I)->getLocation(), diag::note_non_literal_field)
-          << RD << (*I) << (*I)->getType()
-          << (*I)->getType().isVolatileQualified();
+      if (!I->getType()->isLiteralType() ||
+          I->getType().isVolatileQualified()) {
+        Diag(I->getLocation(), diag::note_non_literal_field)
+          << RD << &*I << I->getType()
+          << I->getType().isVolatileQualified();
         return true;
       }
     }
@@ -4353,6 +4374,11 @@ bool Sema::RequireLiteralType(SourceLocation Loc, QualType T,
   }
 
   return true;
+}
+
+bool Sema::RequireLiteralType(SourceLocation Loc, QualType T, unsigned DiagID) {  
+  TypeDiagnoserDiag Diagnoser(DiagID);
+  return RequireLiteralType(Loc, T, Diagnoser);
 }
 
 /// \brief Retrieve a version of the type 'T' that is elaborated by Keyword
@@ -4482,8 +4508,7 @@ QualType Sema::BuildAtomicType(QualType T, SourceLocation Loc) {
   if (!T->isDependentType()) {
     // FIXME: It isn't entirely clear whether incomplete atomic types
     // are allowed or not; for simplicity, ban them for the moment.
-    if (RequireCompleteType(Loc, T,
-                            PDiag(diag::err_atomic_specifier_bad_type) << 0))
+    if (RequireCompleteType(Loc, T, diag::err_atomic_specifier_bad_type, 0))
       return QualType();
 
     int DisallowedKind = -1;

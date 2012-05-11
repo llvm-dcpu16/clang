@@ -375,7 +375,7 @@ InitListChecker::FillInValueInitializations(const InitializedEntity &Entity,
         if (hadError)
           return;
 
-        FillInValueInitForField(Init, *Field, Entity, ILE, RequiresSecondPass);
+        FillInValueInitForField(Init, &*Field, Entity, ILE, RequiresSecondPass);
         if (hadError)
           return;
 
@@ -1336,9 +1336,9 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
       if (Field->getDeclName()) {
         if (VerifyOnly)
           CheckValueInitializable(
-              InitializedEntity::InitializeMember(*Field, &Entity));
+              InitializedEntity::InitializeMember(&*Field, &Entity));
         else
-          StructuredList->setInitializedFieldInUnion(*Field);
+          StructuredList->setInitializedFieldInUnion(&*Field);
         break;
       }
     }
@@ -1401,9 +1401,9 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     // Make sure we can use this declaration.
     bool InvalidUse;
     if (VerifyOnly)
-      InvalidUse = !SemaRef.CanUseDecl(*Field);
+      InvalidUse = !SemaRef.CanUseDecl(&*Field);
     else
-      InvalidUse = SemaRef.DiagnoseUseOfDecl(*Field,
+      InvalidUse = SemaRef.DiagnoseUseOfDecl(&*Field,
                                           IList->getInit(Index)->getLocStart());
     if (InvalidUse) {
       ++Index;
@@ -1413,14 +1413,14 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     }
 
     InitializedEntity MemberEntity =
-      InitializedEntity::InitializeMember(*Field, &Entity);
+      InitializedEntity::InitializeMember(&*Field, &Entity);
     CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
                         StructuredList, StructuredIndex);
     InitializedSomething = true;
 
     if (DeclType->isUnionType() && !VerifyOnly) {
       // Initialize the first field within the union.
-      StructuredList->setInitializedFieldInUnion(*Field);
+      StructuredList->setInitializedFieldInUnion(&*Field);
     }
 
     ++Field;
@@ -1449,7 +1449,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     for (; Field != FieldEnd && !hadError; ++Field) {
       if (!Field->isUnnamedBitfield())
         CheckValueInitializable(
-            InitializedEntity::InitializeMember(*Field, &Entity));
+            InitializedEntity::InitializeMember(&*Field, &Entity));
     }
   }
 
@@ -1457,7 +1457,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
       Index >= IList->getNumInits())
     return;
 
-  if (CheckFlexibleArrayInit(Entity, IList->getInit(Index), *Field,
+  if (CheckFlexibleArrayInit(Entity, IList->getInit(Index), &*Field,
                              TopLevelObject)) {
     hadError = true;
     ++Index;
@@ -1465,7 +1465,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
   }
 
   InitializedEntity MemberEntity =
-    InitializedEntity::InitializeMember(*Field, &Entity);
+    InitializedEntity::InitializeMember(&*Field, &Entity);
 
   if (isa<InitListExpr>(IList->getInit(Index)))
     CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
@@ -1679,7 +1679,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       // IndirectFieldDecl that follow for the designated initializer.
       if (!KnownField && Field->isAnonymousStructOrUnion()) {
         if (IndirectFieldDecl *IF =
-            FindIndirectFieldDesignator(*Field, FieldName)) {
+            FindIndirectFieldDesignator(&*Field, FieldName)) {
           // In verify mode, don't modify the original.
           if (VerifyOnly)
             DIE = CloneDesignatedInitExpr(SemaRef, DIE);
@@ -1688,7 +1688,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
           break;
         }
       }
-      if (KnownField && KnownField == *Field)
+      if (KnownField && KnownField == &*Field)
         break;
       if (FieldName && FieldName == Field->getIdentifier())
         break;
@@ -1757,7 +1757,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
           if (Field->isUnnamedBitfield())
             continue;
 
-          if (ReplacementField == *Field ||
+          if (ReplacementField == &*Field ||
               Field->getIdentifier() == ReplacementField->getIdentifier())
             break;
 
@@ -1771,15 +1771,15 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
     if (RT->getDecl()->isUnion()) {
       FieldIndex = 0;
       if (!VerifyOnly)
-        StructuredList->setInitializedFieldInUnion(*Field);
+        StructuredList->setInitializedFieldInUnion(&*Field);
     }
 
     // Make sure we can use this declaration.
     bool InvalidUse;
     if (VerifyOnly)
-      InvalidUse = !SemaRef.CanUseDecl(*Field);
+      InvalidUse = !SemaRef.CanUseDecl(&*Field);
     else
-      InvalidUse = SemaRef.DiagnoseUseOfDecl(*Field, D->getFieldLoc());
+      InvalidUse = SemaRef.DiagnoseUseOfDecl(&*Field, D->getFieldLoc());
     if (InvalidUse) {
       ++Index;
       return true;
@@ -1787,7 +1787,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
 
     if (!VerifyOnly) {
       // Update the designator with the field declaration.
-      D->setField(*Field);
+      D->setField(&*Field);
 
       // Make sure that our non-designated initializer list has space
       // for a subobject corresponding to this field.
@@ -1809,7 +1809,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
             << SourceRange(NextD->getStartLocation(),
                            DIE->getSourceRange().getEnd());
           SemaRef.Diag(Field->getLocation(), diag::note_flexible_array_member)
-            << *Field;
+            << &*Field;
         }
         Invalid = true;
       }
@@ -1822,13 +1822,13 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
                         diag::err_flexible_array_init_needs_braces)
             << DIE->getInit()->getSourceRange();
           SemaRef.Diag(Field->getLocation(), diag::note_flexible_array_member)
-            << *Field;
+            << &*Field;
         }
         Invalid = true;
       }
 
       // Check GNU flexible array initializer.
-      if (!Invalid && CheckFlexibleArrayInit(Entity, DIE->getInit(), *Field,
+      if (!Invalid && CheckFlexibleArrayInit(Entity, DIE->getInit(), &*Field,
                                              TopLevelObject))
         Invalid = true;
 
@@ -1844,7 +1844,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       IList->setInit(Index, DIE->getInit());
 
       InitializedEntity MemberEntity =
-        InitializedEntity::InitializeMember(*Field, &Entity);
+        InitializedEntity::InitializeMember(&*Field, &Entity);
       CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
                           StructuredList, newStructuredIndex);
 
@@ -1859,11 +1859,11 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       }
     } else {
       // Recurse to check later designated subobjects.
-      QualType FieldType = (*Field)->getType();
+      QualType FieldType = Field->getType();
       unsigned newStructuredIndex = FieldIndex;
 
       InitializedEntity MemberEntity =
-        InitializedEntity::InitializeMember(*Field, &Entity);
+        InitializedEntity::InitializeMember(&*Field, &Entity);
       if (CheckDesignatedInitializer(MemberEntity, IList, DIE, DesigIdx + 1,
                                      FieldType, 0, 0, Index,
                                      StructuredList, newStructuredIndex,
@@ -2877,7 +2877,7 @@ static void TryConstructorInitialization(Sema &S,
 
   // The type we're constructing needs to be complete.
   if (S.RequireCompleteType(Kind.getLocation(), DestType, 0)) {
-    Sequence.SetFailed(InitializationSequence::FK_Incomplete);
+    Sequence.setIncompleteTypeFailure(DestType);
     return;
   }
 
@@ -3108,8 +3108,8 @@ static void TryListInitialization(Sema &S,
     return;
   }
   if (DestType->isRecordType()) {
-    if (S.RequireCompleteType(InitList->getLocStart(), DestType, S.PDiag())) {
-      Sequence.SetFailed(InitializationSequence::FK_Incomplete);
+    if (S.RequireCompleteType(InitList->getLocStart(), DestType, 0)) {
+      Sequence.setIncompleteTypeFailure(DestType);
       return;
     }
 
@@ -3642,11 +3642,10 @@ static void TryValueInitialization(Sema &S,
       //    user-provided or deleted default constructor, then the object is
       //    zero-initialized and, if T has a non-trivial default constructor,
       //    default-initialized;
-      if ((ClassDecl->getTagKind() == TTK_Class ||
-           ClassDecl->getTagKind() == TTK_Struct)) {
-        Sequence.AddZeroInitializationStep(Entity.getType());
-        return TryConstructorInitialization(S, Entity, Kind, 0, 0, T, Sequence);
-      }
+      // FIXME: The 'non-union' here is a defect (not yet assigned an issue
+      // number). Update the quotation when the defect is resolved.
+      Sequence.AddZeroInitializationStep(Entity.getType());
+      return TryConstructorInitialization(S, Entity, Kind, 0, 0, T, Sequence);
     }
   }
 
@@ -4452,7 +4451,7 @@ static ExprResult CopyObject(Sema &S,
   SourceLocation Loc = getInitializationLoc(Entity, CurInit.get());
 
   // Make sure that the type we are copying is complete.
-  if (S.RequireCompleteType(Loc, T, S.PDiag(diag::err_temp_copy_incomplete)))
+  if (S.RequireCompleteType(Loc, T, diag::err_temp_copy_incomplete))
     return move(CurInit);
 
   // Perform overload resolution using the class's copy/move constructors.
@@ -4516,7 +4515,7 @@ static ExprResult CopyObject(Sema &S,
     for (unsigned I = 1, N = Constructor->getNumParams(); I != N; ++I) {
       ParmVarDecl *Parm = Constructor->getParamDecl(I);
       if (S.RequireCompleteType(Loc, Parm->getType(),
-                                S.PDiag(diag::err_call_incomplete_argument)))
+                                diag::err_call_incomplete_argument))
         break;
 
       // Build the default argument expression; we don't actually care
@@ -4815,6 +4814,17 @@ InitializationSequence::Perform(Sema &S,
   // No steps means no initialization.
   if (Steps.empty())
     return S.Owned((Expr *)0);
+
+  if (S.getLangOpts().CPlusPlus0x && Entity.getType()->isReferenceType() &&
+      Args.size() == 1 && isa<InitListExpr>(Args.get()[0]) &&
+      Entity.getKind() != InitializedEntity::EK_Parameter) {
+    // Produce a C++98 compatibility warning if we are initializing a reference
+    // from an initializer list. For parameters, we produce a better warning
+    // elsewhere.
+    Expr *Init = Args.get()[0];
+    S.Diag(Init->getLocStart(), diag::warn_cxx98_compat_reference_list_init)
+      << Init->getSourceRange();
+  }
 
   QualType DestType = Entity.getType().getNonReferenceType();
   // FIXME: Ugly hack around the fact that Entity.getType() is not
@@ -5153,6 +5163,8 @@ InitializationSequence::Perform(Sema &S,
                                         Entity.getType().getNonReferenceType());
       bool UseTemporary = Entity.getType()->isReferenceType();
       InitListExpr *InitList = cast<InitListExpr>(CurInit.get());
+      S.Diag(InitList->getExprLoc(), diag::warn_cxx98_compat_ctor_list_init)
+        << InitList->getSourceRange();
       MultiExprArg Arg(InitList->getInits(), InitList->getNumInits());
       CurInit = PerformConstructorInitialization(S, UseTemporary ? TempEntity :
                                                                    Entity,
@@ -5330,6 +5342,8 @@ InitializationSequence::Perform(Sema &S,
       }
 
       InitListExpr *ILE = cast<InitListExpr>(CurInit.take());
+      S.Diag(ILE->getExprLoc(), diag::warn_cxx98_compat_initializer_list_init)
+        << ILE->getSourceRange();
       unsigned NumInits = ILE->getNumInits();
       SmallVector<Expr*, 16> Converted(NumInits);
       InitializedEntity HiddenArray = InitializedEntity::InitializeTemporary(
@@ -5687,7 +5701,7 @@ bool InitializationSequence::Diagnose(Sema &S,
     break;
 
   case FK_Incomplete:
-    S.RequireCompleteType(Kind.getLocation(), DestType,
+    S.RequireCompleteType(Kind.getLocation(), FailedIncompleteType,
                           diag::err_init_incomplete_type);
     break;
 

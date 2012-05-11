@@ -139,6 +139,29 @@ public:
   }
 };
 
+// Determine if the pointee and sizeof types are compatible.  Here
+// we ignore constness of pointer types.
+static bool typesCompatible(ASTContext &C, QualType A, QualType B) {
+  while (true) {
+    A = A.getCanonicalType();
+    B = B.getCanonicalType();
+  
+    if (A.getTypePtr() == B.getTypePtr())
+      return true;
+    
+    if (const PointerType *ptrA = A->getAs<PointerType>())
+      if (const PointerType *ptrB = B->getAs<PointerType>()) {
+	A = ptrA->getPointeeType();
+	B = ptrB->getPointeeType();
+	continue;
+      }
+      
+    break;
+  }
+  
+  return false;
+}
+
 class MallocSizeofChecker : public Checker<check::ASTCodeBody> {
 public:
   void checkASTCodeBody(const Decl *D, AnalysisManager& mgr,
@@ -166,7 +189,7 @@ public:
           continue;
 
         QualType SizeofType = SFinder.Sizeofs[0]->getTypeOfArgument();
-        if (!BR.getContext().hasSameUnqualifiedType(PointeeType, SizeofType)) {
+        if (!typesCompatible(BR.getContext(), PointeeType, SizeofType)) {
           const TypeSourceInfo *TSI = 0;
           if (i->CastedExprParent.is<const VarDecl *>()) {
             TSI =
@@ -180,9 +203,8 @@ public:
 
           OS << "Result of '"
              << i->AllocCall->getDirectCallee()->getIdentifier()->getName()
-             << "' is converted to type '"
-             << CastedType.getAsString() << "', whose pointee type '"
-             << PointeeType.getAsString() << "' is incompatible with "
+             << "' is converted to a pointer of type '"
+             << PointeeType.getAsString() << "', which is incompatible with "
              << "sizeof operand type '" << SizeofType.getAsString() << "'";
           llvm::SmallVector<SourceRange, 4> Ranges;
           Ranges.push_back(i->AllocCall->getCallee()->getSourceRange());
@@ -194,7 +216,7 @@ public:
             PathDiagnosticLocation::createBegin(i->AllocCall->getCallee(),
                                                 BR.getSourceManager(), ADC);
 
-          BR.EmitBasicReport(D, "allocator sizeof operand mismatch",
+          BR.EmitBasicReport(D, "Allocator sizeof operand mismatch",
                              categories::UnixAPI,
                              OS.str(),
                              L, Ranges.data(), Ranges.size());

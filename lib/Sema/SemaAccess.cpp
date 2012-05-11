@@ -779,6 +779,13 @@ static AccessResult HasAccess(Sema &S,
         // that the naming class has to be derived from the effective
         // context.
 
+        // Emulate a MSVC bug where the creation of pointer-to-member
+        // to protected member of base class is allowed but only from
+        // static member functions.
+        if (S.getLangOpts().MicrosoftMode && !EC.Functions.empty())
+          if (CXXMethodDecl* MD = dyn_cast<CXXMethodDecl>(EC.Functions.front()))
+            if (MD->isStatic()) return AR_accessible;
+
         // Despite the standard's confident wording, there is a case
         // where you can have an instance member that's neither in a
         // pointer-to-member expression nor in a member access:  when
@@ -1384,9 +1391,6 @@ static Sema::AccessResult CheckAccess(Sema &S, SourceLocation Loc,
   if (Entity.getAccess() == AS_public)
     return Sema::AR_accessible;
 
-  if (S.SuppressAccessChecking)
-    return Sema::AR_accessible;
-
   // If we're currently parsing a declaration, we may need to delay
   // access control checking, because our effective context might be
   // different based on what the declaration comes out as.
@@ -1505,6 +1509,29 @@ Sema::AccessResult Sema::CheckUnresolvedMemberAccess(UnresolvedMemberExpr *E,
   Entity.setDiag(diag::err_access) << E->getSourceRange();
 
   return CheckAccess(*this, E->getMemberLoc(), Entity);
+}
+
+/// Is the given special member function accessible for the purposes of
+/// deciding whether to define a special member function as deleted?
+bool Sema::isSpecialMemberAccessibleForDeletion(CXXMethodDecl *decl,
+                                                AccessSpecifier access,
+                                                QualType objectType) {
+  // Fast path.
+  if (access == AS_public || !getLangOpts().AccessControl) return true;
+
+  AccessTarget entity(Context, AccessTarget::Member, decl->getParent(),
+                      DeclAccessPair::make(decl, access), objectType);
+
+  // Suppress diagnostics.
+  entity.setDiag(PDiag());
+
+  switch (CheckAccess(*this, SourceLocation(), entity)) {
+  case AR_accessible: return true;
+  case AR_inaccessible: return false;
+  case AR_dependent: llvm_unreachable("dependent for =delete computation");
+  case AR_delayed: llvm_unreachable("cannot delay =delete computation");
+  }
+  llvm_unreachable("bad access result");
 }
 
 Sema::AccessResult Sema::CheckDestructorAccess(SourceLocation Loc,
@@ -1805,16 +1832,4 @@ bool Sema::IsSimplyAccessible(NamedDecl *Decl, DeclContext *Ctx) {
   }
   
   return true;
-}
-
-void Sema::ActOnStartSuppressingAccessChecks() {
-  assert(!SuppressAccessChecking &&
-         "Tried to start access check suppression when already started.");
-  SuppressAccessChecking = true;
-}
-
-void Sema::ActOnStopSuppressingAccessChecks() {
-  assert(SuppressAccessChecking &&
-         "Tried to stop access check suprression when already stopped.");
-  SuppressAccessChecking = false;
 }

@@ -62,12 +62,21 @@
 // 
 // RUN: %clang_cc1 -ffreestanding -E -dM < /dev/null | FileCheck -check-prefix FREESTANDING %s
 // FREESTANDING:#define __STDC_HOSTED__ 0
-// 
+//
+//
+// RUN: %clang_cc1 -x c++ -std=gnu++11 -E -dM < /dev/null | FileCheck -check-prefix GXX11 %s
+//
+// GXX11:#define __GNUG__
+// GXX11:#define __GXX_WEAK__ 1
+// GXX11:#define __cplusplus 201103L
+// GXX11:#define __private_extern__ extern
+//
+//
 // RUN: %clang_cc1 -x c++ -std=gnu++98 -E -dM < /dev/null | FileCheck -check-prefix GXX98 %s
 //
 // GXX98:#define __GNUG__
 // GXX98:#define __GXX_WEAK__ 1
-// GXX98:#define __cplusplus 1
+// GXX98:#define __cplusplus 199711L
 // GXX98:#define __private_extern__ extern
 //
 // 
@@ -1762,3 +1771,6 @@
 // NORTTI: __GXX_ABI_VERSION
 // NORTTI-NOT:#define __GXX_RTTI
 // NORTTI: __STDC__
+//
+// RUN: %clang_cc1 -triple arm-linux-androideabi -E -dM < /dev/null | FileCheck -check-prefix ANDROID %s
+// ANDROID: __ANDROID__ 1

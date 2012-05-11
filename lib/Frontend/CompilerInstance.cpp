@@ -88,6 +88,7 @@ void CompilerInstance::setASTConsumer(ASTConsumer *Value) {
 
 void CompilerInstance::setCodeCompletionConsumer(CodeCompleteConsumer *Value) {
   CompletionConsumer.reset(Value);
+  getFrontendOpts().SkipFunctionBodies = Value != 0;
 }
 
 // Diagnostics
@@ -383,7 +384,7 @@ static bool EnableCodeCompletion(Preprocessor &PP,
 void CompilerInstance::createCodeCompletionConsumer() {
   const ParsedSourceLocation &Loc = getFrontendOpts().CodeCompletionAt;
   if (!CompletionConsumer) {
-    CompletionConsumer.reset(
+    setCodeCompletionConsumer(
       createCodeCompletionConsumer(getPreprocessor(),
                                    Loc.FileName, Loc.Line, Loc.Column,
                                    getFrontendOpts().ShowMacrosInCodeCompletion,
@@ -394,14 +395,14 @@ void CompilerInstance::createCodeCompletionConsumer() {
       return;
   } else if (EnableCodeCompletion(getPreprocessor(), Loc.FileName,
                                   Loc.Line, Loc.Column)) {
-    CompletionConsumer.reset();
+    setCodeCompletionConsumer(0);
     return;
   }
 
   if (CompletionConsumer->isOutputBinary() &&
       llvm::sys::Program::ChangeStdoutToBinary()) {
     getPreprocessor().getDiagnostics().Report(diag::err_fe_stdout_binary);
-    CompletionConsumer.reset();
+    setCodeCompletionConsumer(0);
   }
 }
 
@@ -559,7 +560,8 @@ CompilerInstance::createOutputFile(StringRef OutputPath,
       TempPath += "-%%%%%%%%";
       int fd;
       if (llvm::sys::fs::unique_file(TempPath.str(), fd, TempPath,
-                               /*makeAbsolute=*/false) == llvm::errc::success) {
+                                     /*makeAbsolute=*/false, 0664)
+          == llvm::errc::success) {
         OS.reset(new llvm::raw_fd_ostream(fd, /*shouldClose=*/true));
         OSFile = TempFile = TempPath.str();
       }
@@ -649,6 +651,10 @@ bool CompilerInstance::ExecuteAction(FrontendAction &Act) {
   // FIXME: We shouldn't need to do this, the target should be immutable once
   // created. This complexity should be lifted elsewhere.
   getTarget().setForcedLangOptions(getLangOpts());
+
+  // rewriter project will change target built-in bool type from its default. 
+  if (getFrontendOpts().ProgramAction == frontend::RewriteObjC)
+    getTarget().noSignedCharForObjCBool();
 
   // Validate/process some options.
   if (getHeaderSearchOpts().Verbose)
@@ -854,13 +860,6 @@ Module *CompilerInstance::loadModule(SourceLocation ImportLoc,
   }
   
   // Determine what file we're searching from.
-  SourceManager &SourceMgr = getSourceManager();
-  SourceLocation ExpandedImportLoc = SourceMgr.getExpansionLoc(ImportLoc);
-  const FileEntry *CurFile
-    = SourceMgr.getFileEntryForID(SourceMgr.getFileID(ExpandedImportLoc));
-  if (!CurFile)
-    CurFile = SourceMgr.getFileEntryForID(SourceMgr.getMainFileID());
-
   StringRef ModuleName = Path[0].first->getName();
   SourceLocation ModuleNameLoc = Path[0].second;
 

@@ -594,20 +594,57 @@ BUILTIN(__sync_swap_4, "iiD*i.", "tn")
 BUILTIN(__sync_swap_8, "LLiLLiD*LLi.", "tn")
 BUILTIN(__sync_swap_16, "LLLiLLLiD*LLLi.", "tn")
 
-BUILTIN(__atomic_load, "v.", "t")
-BUILTIN(__atomic_store, "v.", "t")
-BUILTIN(__atomic_exchange, "v.", "t")
-BUILTIN(__atomic_compare_exchange_strong, "v.", "t")
-BUILTIN(__atomic_compare_exchange_weak, "v.", "t")
-BUILTIN(__atomic_fetch_add, "v.", "t")
-BUILTIN(__atomic_fetch_sub, "v.", "t")
-BUILTIN(__atomic_fetch_and, "v.", "t")
-BUILTIN(__atomic_fetch_or, "v.", "t")
-BUILTIN(__atomic_fetch_xor, "v.", "t")
+// Some of our atomics builtins are handled by AtomicExpr rather than
+// as normal builtin CallExprs. This macro is used for such builtins.
+#ifndef ATOMIC_BUILTIN
+#define ATOMIC_BUILTIN(ID, TYPE, ATTRS) BUILTIN(ID, TYPE, ATTRS)
+#endif
+
+// C11 _Atomic operations for <stdatomic.h>.
+ATOMIC_BUILTIN(__c11_atomic_init, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_load, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_store, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_exchange, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_compare_exchange_strong, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_compare_exchange_weak, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_add, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_sub, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_and, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_or, "v.", "t")
+ATOMIC_BUILTIN(__c11_atomic_fetch_xor, "v.", "t")
+BUILTIN(__c11_atomic_thread_fence, "vi", "n")
+BUILTIN(__c11_atomic_signal_fence, "vi", "n")
+BUILTIN(__c11_atomic_is_lock_free, "iz", "n")
+
+// GNU atomic builtins.
+ATOMIC_BUILTIN(__atomic_load, "v.", "t")
+ATOMIC_BUILTIN(__atomic_load_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_store, "v.", "t")
+ATOMIC_BUILTIN(__atomic_store_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_exchange, "v.", "t")
+ATOMIC_BUILTIN(__atomic_exchange_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_compare_exchange, "v.", "t")
+ATOMIC_BUILTIN(__atomic_compare_exchange_n, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_add, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_sub, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_and, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_or, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_xor, "v.", "t")
+ATOMIC_BUILTIN(__atomic_fetch_nand, "v.", "t")
+ATOMIC_BUILTIN(__atomic_add_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_sub_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_and_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_or_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_xor_fetch, "v.", "t")
+ATOMIC_BUILTIN(__atomic_nand_fetch, "v.", "t")
+BUILTIN(__atomic_test_and_set, "bvD*i", "n")
+BUILTIN(__atomic_clear, "vvD*i", "n")
 BUILTIN(__atomic_thread_fence, "vi", "n")
 BUILTIN(__atomic_signal_fence, "vi", "n")
-BUILTIN(__atomic_init, "v.", "t")
-BUILTIN(__atomic_is_lock_free, "iz", "n")
+BUILTIN(__atomic_always_lock_free, "izvCD*", "n")
+BUILTIN(__atomic_is_lock_free, "izvCD*", "n")
+
+#undef ATOMIC_BUILTIN
 
 // Non-overloaded atomic builtins.
 BUILTIN(__sync_synchronize, "v.", "n")
@@ -688,6 +725,10 @@ LIBBUILTIN(strndup, "c*cC*z",     "f",     "string.h", ALL_LANGUAGES)
 LIBBUILTIN(index, "c*cC*i",       "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(rindex, "c*cC*i",      "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(bzero, "vv*z",         "f",     "strings.h", ALL_LANGUAGES)
+// In some systems str[n]casejmp is a macro that expands to _str[n]icmp.
+// We undefine then here to avoid wrong name.
+#undef strcasecmp
+#undef strncasecmp
 LIBBUILTIN(strcasecmp, "icC*cC*", "f",     "strings.h", ALL_LANGUAGES)
 LIBBUILTIN(strncasecmp, "icC*cC*z", "f",   "strings.h", ALL_LANGUAGES)
 // POSIX unistd.h
@@ -767,25 +808,77 @@ LIBBUILTIN(NSLog, "vG.", "fp:0:", "Foundation/NSObjCRuntime.h", OBJC_LANG)
 LIBBUILTIN(NSLogv, "vGa", "fP:0:", "Foundation/NSObjCRuntime.h", OBJC_LANG)
 
 // Builtin math library functions
-LIBBUILTIN(pow, "ddd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(powl, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(powf, "fff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(acos, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(acosl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(acosf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(sqrt, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(sqrtl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(sqrtf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(asin, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(asinl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(asinf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
-LIBBUILTIN(sin, "dd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(sinl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
-LIBBUILTIN(sinf, "ff", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(atan, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(atanl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(atanf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(atan2, "ddd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(atan2l, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(atan2f, "fff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(ceil, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(ceill, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(ceilf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
 LIBBUILTIN(cos, "dd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(cosl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(cosf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
+LIBBUILTIN(exp, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(expl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(expf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(fabs, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fabsl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fabsf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(floor, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(floorl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(floorf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
 LIBBUILTIN(fma, "dddd", "fc", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(fmal, "LdLdLdLd", "fc", "math.h", ALL_LANGUAGES)
 LIBBUILTIN(fmaf, "ffff", "fc", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(fmax, "ddd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmaxl, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fmaxf, "fff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(fmin, "ddd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fminl, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(fminf, "fff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(log, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(logl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(logf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(pow, "ddd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(powl, "LdLdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(powf, "fff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(round, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(roundl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(roundf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(sin, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(sinl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(sinf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(sqrt, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(sqrtl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(sqrtf, "ff", "fe", "math.h", ALL_LANGUAGES)
+
+LIBBUILTIN(tan, "dd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(tanl, "LdLd", "fe", "math.h", ALL_LANGUAGES)
+LIBBUILTIN(tanf, "ff", "fe", "math.h", ALL_LANGUAGES)
 
 // Blocks runtime Builtin math library functions
 LIBBUILTIN(_Block_object_assign, "vv*vC*iC", "f", "Blocks.h", ALL_LANGUAGES)
@@ -793,7 +886,7 @@ LIBBUILTIN(_Block_object_dispose, "vvC*iC", "f", "Blocks.h", ALL_LANGUAGES)
 // FIXME: Also declare NSConcreteGlobalBlock and NSConcreteStackBlock.
 
 // Annotation function
-BUILTIN(__builtin_annotation, "UiUicC*", "nc")
+BUILTIN(__builtin_annotation, "v.", "tn")
 
 #undef BUILTIN
 #undef LIBBUILTIN

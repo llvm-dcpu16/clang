@@ -42,8 +42,6 @@ using llvm::APSInt;
 
 STATISTIC(NumRemoveDeadBindings,
             "The # of times RemoveDeadBindings is called");
-STATISTIC(NumRemoveDeadBindingsSkipped,
-            "The # of times RemoveDeadBindings is skipped");
 STATISTIC(NumMaxBlockCountReached,
             "The # of aborted paths due to reaching the maximum block count in "
             "a top level function");
@@ -67,7 +65,7 @@ static inline Selector GetNullarySelector(const char* name, ASTContext &Ctx) {
 //===----------------------------------------------------------------------===//
 
 ExprEngine::ExprEngine(AnalysisManager &mgr, bool gcEnabled,
-                       SetOfDecls *VisitedCallees,
+                       SetOfConstDecls *VisitedCallees,
                        FunctionSummariesTy *FS)
   : AMgr(mgr),
     AnalysisDeclContexts(mgr.getAnalysisDeclContextManager()),
@@ -231,6 +229,7 @@ void ExprEngine::processCFGElement(const CFGElement E, ExplodedNode *Pred,
       ProcessImplicitDtor(*E.getAs<CFGImplicitDtor>(), Pred);
       return;
   }
+  currentBuilderContext = 0;
 }
 
 static bool shouldRemoveDeadBindings(AnalysisManager &AMgr,
@@ -260,62 +259,47 @@ static bool shouldRemoveDeadBindings(AnalysisManager &AMgr,
   return !PM.isConsumedExpr(cast<Expr>(S.getStmt()));
 }
 
-void ExprEngine::ProcessStmt(const CFGStmt S,
-                             ExplodedNode *Pred) {
-  // Reclaim any unnecessary nodes in the ExplodedGraph.
-  G.reclaimRecentlyAllocatedNodes();
-  
-  currentStmt = S.getStmt();
-  PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),
-                                currentStmt->getLocStart(),
-                                "Error evaluating statement");
+void ExprEngine::removeDead(ExplodedNode *Pred, ExplodedNodeSet &Out,
+                            const Stmt *ReferenceStmt,
+                            const LocationContext *LC,
+                            const Stmt *DiagnosticStmt,
+                            ProgramPoint::Kind K) {
+  assert((K == ProgramPoint::PreStmtPurgeDeadSymbolsKind ||
+          ReferenceStmt == 0) && "PreStmt is not generally supported by "
+                                 "the SymbolReaper yet");
+  NumRemoveDeadBindings++;
+  CleanedState = Pred->getState();
+  SymbolReaper SymReaper(LC, ReferenceStmt, SymMgr, getStoreManager());
 
-  EntryNode = Pred;
+  getCheckerManager().runCheckersForLiveSymbols(CleanedState, SymReaper);
 
-  ProgramStateRef EntryState = EntryNode->getState();
-  CleanedState = EntryState;
-
-  // Create the cleaned state.
-  const LocationContext *LC = EntryNode->getLocationContext();
-  SymbolReaper SymReaper(LC, currentStmt, SymMgr, getStoreManager());
-
-  if (shouldRemoveDeadBindings(AMgr, S, Pred, LC)) {
-    NumRemoveDeadBindings++;
-    getCheckerManager().runCheckersForLiveSymbols(CleanedState, SymReaper);
-
-    const StackFrameContext *SFC = LC->getCurrentStackFrame();
-
-    // Create a state in which dead bindings are removed from the environment
-    // and the store. TODO: The function should just return new env and store,
-    // not a new state.
-    CleanedState = StateMgr.removeDeadBindings(CleanedState, SFC, SymReaper);
-  } else {
-    NumRemoveDeadBindingsSkipped++;
-  }
+  // Create a state in which dead bindings are removed from the environment
+  // and the store. TODO: The function should just return new env and store,
+  // not a new state.
+  const StackFrameContext *SFC = LC->getCurrentStackFrame();
+  CleanedState = StateMgr.removeDeadBindings(CleanedState, SFC, SymReaper);
 
   // Process any special transfer function for dead symbols.
-  ExplodedNodeSet Tmp;
   // A tag to track convenience transitions, which can be removed at cleanup.
   static SimpleProgramPointTag cleanupTag("ExprEngine : Clean Node");
-
   if (!SymReaper.hasDeadSymbols()) {
     // Generate a CleanedNode that has the environment and store cleaned
     // up. Since no symbols are dead, we can optimize and not clean out
     // the constraint manager.
-    StmtNodeBuilder Bldr(Pred, Tmp, *currentBuilderContext);
-    Bldr.generateNode(currentStmt, EntryNode, CleanedState, false, &cleanupTag);
+    StmtNodeBuilder Bldr(Pred, Out, *currentBuilderContext);
+    Bldr.generateNode(DiagnosticStmt, Pred, CleanedState, false, &cleanupTag,K);
 
   } else {
     // Call checkers with the non-cleaned state so that they could query the
     // values of the soon to be dead symbols.
     ExplodedNodeSet CheckedSet;
-    getCheckerManager().runCheckersForDeadSymbols(CheckedSet, EntryNode,
-                                                 SymReaper, currentStmt, *this);
+    getCheckerManager().runCheckersForDeadSymbols(CheckedSet, Pred, SymReaper,
+                                                  DiagnosticStmt, *this, K);
 
     // For each node in CheckedSet, generate CleanedNodes that have the
     // environment, the store, and the constraints cleaned up but have the
     // user-supplied states as the predecessors.
-    StmtNodeBuilder Bldr(CheckedSet, Tmp, *currentBuilderContext);
+    StmtNodeBuilder Bldr(CheckedSet, Out, *currentBuilderContext);
     for (ExplodedNodeSet::const_iterator
           I = CheckedSet.begin(), E = CheckedSet.end(); I != E; ++I) {
       ProgramStateRef CheckerState = (*I)->getState();
@@ -324,10 +308,10 @@ void ExprEngine::ProcessStmt(const CFGStmt S,
       CheckerState = getConstraintManager().removeDeadBindings(CheckerState,
                                                                SymReaper);
 
-      assert(StateMgr.haveEqualEnvironments(CheckerState, EntryState) &&
+      assert(StateMgr.haveEqualEnvironments(CheckerState, Pred->getState()) &&
         "Checkers are not allowed to modify the Environment as a part of "
         "checkDeadSymbols processing.");
-      assert(StateMgr.haveEqualStores(CheckerState, EntryState) &&
+      assert(StateMgr.haveEqualStores(CheckerState, Pred->getState()) &&
         "Checkers are not allowed to modify the Store as a part of "
         "checkDeadSymbols processing.");
 
@@ -335,13 +319,35 @@ void ExprEngine::ProcessStmt(const CFGStmt S,
       // generate a transition to that state.
       ProgramStateRef CleanedCheckerSt =
         StateMgr.getPersistentStateWithGDM(CleanedState, CheckerState);
-      Bldr.generateNode(currentStmt, *I, CleanedCheckerSt, false, &cleanupTag,
-                        ProgramPoint::PostPurgeDeadSymbolsKind);
+      Bldr.generateNode(DiagnosticStmt, *I, CleanedCheckerSt, false,
+                        &cleanupTag, K);
     }
   }
+}
 
+void ExprEngine::ProcessStmt(const CFGStmt S,
+                             ExplodedNode *Pred) {
+  // Reclaim any unnecessary nodes in the ExplodedGraph.
+  G.reclaimRecentlyAllocatedNodes();
+
+  currentStmt = S.getStmt();
+  PrettyStackTraceLoc CrashInfo(getContext().getSourceManager(),
+                                currentStmt->getLocStart(),
+                                "Error evaluating statement");
+
+  // Remove dead bindings and symbols.
+  EntryNode = Pred;
+  ExplodedNodeSet CleanedStates;
+  if (shouldRemoveDeadBindings(AMgr, S, Pred, EntryNode->getLocationContext())){
+    removeDead(EntryNode, CleanedStates, currentStmt,
+               Pred->getLocationContext(), currentStmt);
+  } else
+    CleanedStates.Add(EntryNode);
+
+  // Visit the statement.
   ExplodedNodeSet Dst;
-  for (ExplodedNodeSet::iterator I=Tmp.begin(), E=Tmp.end(); I!=E; ++I) {
+  for (ExplodedNodeSet::iterator I = CleanedStates.begin(),
+                                 E = CleanedStates.end(); I != E; ++I) {
     ExplodedNodeSet DstI;
     // Visit the statement.
     Visit(currentStmt, *I, DstI);
@@ -490,7 +496,6 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::CXXTypeidExprClass:
     case Stmt::CXXUuidofExprClass:
     case Stmt::CXXUnresolvedConstructExprClass:
-    case Stmt::CXXScalarValueInitExprClass:
     case Stmt::DependentScopeDeclRefExprClass:
     case Stmt::UnaryTypeTraitExprClass:
     case Stmt::BinaryTypeTraitExprClass:
@@ -536,6 +541,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::IfStmtClass:
     case Stmt::IndirectGotoStmtClass:
     case Stmt::LabelStmtClass:
+    case Stmt::AttributedStmtClass:
     case Stmt::NoStmtClass:
     case Stmt::NullStmtClass:
     case Stmt::SwitchStmtClass:
@@ -566,15 +572,6 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
       // Implicitly handled by Environment::getSVal().
       break;
 
-    case Stmt::ImplicitValueInitExprClass: {
-      ProgramStateRef state = Pred->getState();
-      QualType ty = cast<ImplicitValueInitExpr>(S)->getType();
-      SVal val = svalBuilder.makeZeroVal(ty);
-      Bldr.generateNode(S, Pred, state->BindExpr(S, Pred->getLocationContext(),
-                                                 val));
-      break;
-    }
-      
     case Stmt::ExprWithCleanupsClass:
       // Handled due to fully linearised CFG.
       break;
@@ -591,7 +588,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::ObjCIsaExprClass:
     case Stmt::ObjCProtocolExprClass:
     case Stmt::ObjCSelectorExprClass:
-    case Expr::ObjCNumericLiteralClass:
+    case Expr::ObjCBoxedExprClass:
     case Stmt::ParenListExprClass:
     case Stmt::PredefinedExprClass:
     case Stmt::ShuffleVectorExprClass:
@@ -612,6 +609,8 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::AddrLabelExprClass:
     case Stmt::IntegerLiteralClass:
     case Stmt::CharacterLiteralClass:
+    case Stmt::ImplicitValueInitExprClass:
+    case Stmt::CXXScalarValueInitExprClass:
     case Stmt::CXXBoolLiteralExprClass:
     case Stmt::ObjCBoolLiteralExprClass:
     case Stmt::FloatingLiteralClass:
@@ -993,7 +992,7 @@ bool ExprEngine::replayWithoutInlining(ExplodedNode *N,
       continue;
     // We reached the caller. Find the node right before we started
     // processing the CallExpr.
-    if (isa<PostPurgeDeadSymbols>(L))
+    if (L.isPurgeKind())
       continue;
     if (const StmtPoint *SP = dyn_cast<StmtPoint>(&L))
       if (SP->getStmt() == CalleeSF->getCallSite())
@@ -1860,10 +1859,17 @@ struct DOTGraphTraits<ExplodedNode*> :
     ProgramPoint Loc = N->getLocation();
 
     switch (Loc.getKind()) {
-      case ProgramPoint::BlockEntranceKind:
+      case ProgramPoint::BlockEntranceKind: {
         Out << "Block Entrance: B"
             << cast<BlockEntrance>(Loc).getBlock()->getBlockID();
+        if (const NamedDecl *ND =
+                    dyn_cast<NamedDecl>(Loc.getLocationContext()->getDecl())) {
+          Out << " (";
+          ND->printName(Out);
+          Out << ")";
+        }
         break;
+      }
 
       case ProgramPoint::BlockExitKind:
         assert (false);
@@ -1873,8 +1879,20 @@ struct DOTGraphTraits<ExplodedNode*> :
         Out << "CallEnter";
         break;
 
-      case ProgramPoint::CallExitKind:
-        Out << "CallExit";
+      case ProgramPoint::CallExitBeginKind:
+        Out << "CallExitBegin";
+        break;
+
+      case ProgramPoint::CallExitEndKind:
+        Out << "CallExitEnd";
+        break;
+
+      case ProgramPoint::PostStmtPurgeDeadSymbolsKind:
+        Out << "PostStmtPurgeDeadSymbols";
+        break;
+
+      case ProgramPoint::PreStmtPurgeDeadSymbolsKind:
+        Out << "PreStmtPurgeDeadSymbols";
         break;
 
       case ProgramPoint::EpsilonKind:

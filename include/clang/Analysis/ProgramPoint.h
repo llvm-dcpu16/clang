@@ -40,19 +40,21 @@ public:
               BlockEntranceKind,
               BlockExitKind,
               PreStmtKind,
+              PreStmtPurgeDeadSymbolsKind,
+              PostStmtPurgeDeadSymbolsKind,
               PostStmtKind,
               PreLoadKind,
               PostLoadKind,
               PreStoreKind,
               PostStoreKind,
-              PostPurgeDeadSymbolsKind,
               PostConditionKind,
               PostLValueKind,
               PostInitializerKind,
               CallEnterKind,
-              CallExitKind,
+              CallExitBeginKind,
+              CallExitEndKind,
               MinPostStmtKind = PostStmtKind,
-              MaxPostStmtKind = CallExitKind,
+              MaxPostStmtKind = CallExitEndKind,
               EpsilonKind};
 
 private:
@@ -113,6 +115,14 @@ public:
     return (Kind) x;
   }
 
+  /// \brief Is this a program point corresponding to purge/removal of dead
+  /// symbols and bindings.
+  bool isPurgeKind() {
+    Kind K = getKind();
+    return (K == PostStmtPurgeDeadSymbolsKind ||
+            K == PreStmtPurgeDeadSymbolsKind);
+  }
+
   const ProgramPointTag *getTag() const { return Tag; }
 
   const LocationContext *getLocationContext() const {
@@ -129,7 +139,7 @@ public:
   static bool classof(const ProgramPoint*) { return true; }
 
   bool operator==(const ProgramPoint & RHS) const {
-    return Data1 == Data1 &&
+    return Data1 == RHS.Data1 &&
            Data2 == RHS.Data2 &&
            L == RHS.L &&
            Tag == RHS.Tag;
@@ -340,14 +350,29 @@ public:
   }
 };
 
-class PostPurgeDeadSymbols : public PostStmt {
+/// \class Represents a point after we ran remove dead bindings BEFORE
+/// processing the given statement.
+class PreStmtPurgeDeadSymbols : public StmtPoint {
 public:
-  PostPurgeDeadSymbols(const Stmt *S, const LocationContext *L,
+  PreStmtPurgeDeadSymbols(const Stmt *S, const LocationContext *L,
                        const ProgramPointTag *tag = 0)
-    : PostStmt(S, PostPurgeDeadSymbolsKind, L, tag) {}
+    : StmtPoint(S, 0, PreStmtPurgeDeadSymbolsKind, L, tag) { }
 
   static bool classof(const ProgramPoint* Location) {
-    return Location->getKind() == PostPurgeDeadSymbolsKind;
+    return Location->getKind() == PreStmtPurgeDeadSymbolsKind;
+  }
+};
+
+/// \class Represents a point after we ran remove dead bindings AFTER
+/// processing the  given statement.
+class PostStmtPurgeDeadSymbols : public StmtPoint {
+public:
+  PostStmtPurgeDeadSymbols(const Stmt *S, const LocationContext *L,
+                       const ProgramPointTag *tag = 0)
+    : StmtPoint(S, 0, PostStmtPurgeDeadSymbolsKind, L, tag) { }
+
+  static bool classof(const ProgramPoint* Location) {
+    return Location->getKind() == PostStmtPurgeDeadSymbolsKind;
   }
 };
 
@@ -383,6 +408,7 @@ public:
   }
 };
 
+/// \class Represents a point when we begin processing an inlined call.
 class CallEnter : public StmtPoint {
 public:
   CallEnter(const Stmt *stmt, const StackFrameContext *calleeCtx, 
@@ -402,14 +428,38 @@ public:
   }
 };
 
-class CallExit : public StmtPoint {
+/// \class Represents a point when we start the call exit sequence (for
+/// inlined call).
+///
+/// The call exit is simulated with a sequence of nodes, which occur between
+/// CallExitBegin and CallExitEnd. The following operations occur between the
+/// two program points:
+/// - CallExitBegin
+/// - Bind the return value
+/// - Run Remove dead bindings (to clean up the dead symbols from the callee).
+/// - CallExitEnd
+class CallExitBegin : public StmtPoint {
 public:
-  // CallExit uses the callee's location context.
-  CallExit(const Stmt *S, const LocationContext *L)
-    : StmtPoint(S, 0, CallExitKind, L, 0) {}
+  // CallExitBegin uses the callee's location context.
+  CallExitBegin(const Stmt *S, const LocationContext *L)
+    : StmtPoint(S, 0, CallExitBeginKind, L, 0) {}
 
   static bool classof(const ProgramPoint *Location) {
-    return Location->getKind() == CallExitKind;
+    return Location->getKind() == CallExitBeginKind;
+  }
+};
+
+/// \class Represents a point when we finish the call exit sequence (for
+/// inlined call).
+/// \sa CallExitBegin
+class CallExitEnd : public StmtPoint {
+public:
+  // CallExitEnd uses the caller's location context.
+  CallExitEnd(const Stmt *S, const LocationContext *L)
+    : StmtPoint(S, 0, CallExitEndKind, L, 0) {}
+
+  static bool classof(const ProgramPoint *Location) {
+    return Location->getKind() == CallExitEndKind;
   }
 };
 

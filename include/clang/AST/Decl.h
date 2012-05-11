@@ -218,6 +218,7 @@ public:
     Visibility visibility_;
     bool explicit_;
 
+    void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
   public:
     LinkageInfo() : linkage_(ExternalLinkage), visibility_(DefaultVisibility),
                     explicit_(false) {}
@@ -242,12 +243,6 @@ public:
     bool visibilityExplicit() const { return explicit_; }
 
     void setLinkage(Linkage L) { linkage_ = L; }
-    void setVisibility(Visibility V) { visibility_ = V; }
-    void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
-    void setVisibility(LinkageInfo Other) {
-      setVisibility(Other.visibility(), Other.visibilityExplicit());
-    }
-
     void mergeLinkage(Linkage L) {
       setLinkage(minLinkage(linkage(), L));
     }
@@ -260,15 +255,15 @@ public:
     // down to one of its members. If the member has no explicit visibility,
     // the class visibility wins.
     void mergeVisibility(Visibility V, bool E = false) {
-      // If one has explicit visibility and the other doesn't, keep the
-      // explicit one.
-      if (visibilityExplicit() && !E)
+      // Never increase the visibility
+      if (visibility() < V)
         return;
-      if (!visibilityExplicit() && E)
-        setVisibility(V, E);
 
-      // If both are explicit or both are implicit, keep the minimum.
-      setVisibility(minVisibility(visibility(), V), visibilityExplicit() || E);
+      // If we have an explicit visibility, keep it
+      if (visibilityExplicit())
+        return;
+
+      setVisibility(V, E);
     }
     // Merge the visibility V, keeping the most restrictive one.
     // This is used for cases like merging the visibility of a template
@@ -279,9 +274,16 @@ public:
       if (visibility() < V)
         return;
 
+      // FIXME: this
       // If this visibility is explicit, keep it.
       if (visibilityExplicit() && !E)
         return;
+
+      // should be replaced with this
+      // Don't lose the explicit bit for nothing
+      //      if (visibility() == V && visibilityExplicit())
+      //        return;
+
       setVisibility(V, E);
     }
     void mergeVisibility(LinkageInfo Other) {
@@ -298,11 +300,6 @@ public:
     void mergeWithMin(LinkageInfo Other) {
       mergeLinkage(Other);
       mergeVisibilityWithMin(Other);
-    }
-
-    friend LinkageInfo merge(LinkageInfo L, LinkageInfo R) {
-      L.merge(R);
-      return L;
     }
   };
 
@@ -2606,6 +2603,7 @@ public:
 
   void setCompleteDefinition(bool V) { IsCompleteDefinition = V; }
 
+  // FIXME: Return StringRef;
   const char *getKindName() const {
     return TypeWithKeyword::getTagTypeKindName(getTagKind());
   }

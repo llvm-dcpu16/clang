@@ -15,6 +15,7 @@
 #include "clang/AST/Expr.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/SmallString.h"
 using namespace clang;
 
 size_t AttributeList::allocated_size() const {
@@ -97,7 +98,10 @@ AttributePool::createIntegerAttribute(ASTContext &C, IdentifierInfo *Name,
   return create(Name, TokLoc, 0, TokLoc, 0, TokLoc, &IArg, 1, 0);
 }
 
-AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
+#include "clang/Sema/AttrParsedAttrKinds.inc"
+
+AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name,
+                                           const IdentifierInfo *ScopeName) {
   StringRef AttrName = Name->getName();
 
   // Normalize the attribute name, __foo__ becomes foo.
@@ -105,22 +109,10 @@ AttributeList::Kind AttributeList::getKind(const IdentifierInfo *Name) {
       AttrName.size() >= 4)
     AttrName = AttrName.substr(2, AttrName.size() - 4);
 
-  return llvm::StringSwitch<AttributeList::Kind>(AttrName)
-    #include "clang/Sema/AttrParsedAttrKinds.inc"
-    .Case("address_space", AT_address_space)
-    .Case("align", AT_aligned) // FIXME - should it be "aligned"?
-    .Case("base_check", AT_base_check)
-    .Case("bounded", IgnoredAttribute)       // OpenBSD
-    .Case("__const", AT_const) // some GCC headers do contain this spelling
-    .Case("cf_returns_autoreleased", AT_cf_returns_autoreleased)
-    .Case("mode", AT_mode)
-    .Case("vec_type_hint", IgnoredAttribute)
-    .Case("ext_vector_type", AT_ext_vector_type)
-    .Case("neon_vector_type", AT_neon_vector_type)
-    .Case("neon_polyvector_type", AT_neon_polyvector_type)
-    .Case("opencl_image_access", AT_opencl_image_access)
-    .Case("objc_gc", AT_objc_gc)
-    .Case("objc_ownership", AT_objc_ownership)
-    .Case("vector_size", AT_vector_size)
-    .Default(UnknownAttribute);
+  // FIXME: implement attribute namespacing correctly.
+  SmallString<64> Buf;
+  if (ScopeName)
+    AttrName = ((Buf += ScopeName->getName()) += "___") += AttrName;
+
+  return ::getAttrKind(AttrName);
 }

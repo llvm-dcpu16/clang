@@ -219,7 +219,7 @@ void EmitAssemblyHelper::CreatePasses() {
                                     CodeGenOpts.EmitGcovArcs,
                                     TargetTriple.isMacOSX()));
 
-    if (!CodeGenOpts.DebugInfo)
+    if (CodeGenOpts.DebugInfo == CodeGenOptions::NoDebugInfo)
       MPM->add(createStripSymbolsPass(true));
   }
   
@@ -344,6 +344,7 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
   Options.RealignStack = CodeGenOpts.StackRealignment;
   Options.DisableTailCalls = CodeGenOpts.DisableTailCalls;
   Options.TrapFuncName = CodeGenOpts.TrapFuncName;
+  Options.PositionIndependentExecutable = LangOpts.PIELevel != 0;
 
   TargetMachine *TM = TheTarget->createTargetMachine(Triple, TargetOpts.CPU,
                                                      FeaturesStr, Options,

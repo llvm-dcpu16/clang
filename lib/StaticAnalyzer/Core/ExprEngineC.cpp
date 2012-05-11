@@ -58,6 +58,26 @@ void ExprEngine::VisitBinaryOperator(const BinaryOperator* B,
       
     if (!B->isAssignmentOp()) {
       StmtNodeBuilder Bldr(*it, Tmp2, *currentBuilderContext);
+
+      if (B->isAdditiveOp()) {
+        // If one of the operands is a location, conjure a symbol for the other
+        // one (offset) if it's unknown so that memory arithmetic always
+        // results in an ElementRegion.
+        // TODO: This can be removed after we enable history tracking with
+        // SymSymExpr.
+        unsigned Count = currentBuilderContext->getCurrentBlockCount();
+        if (isa<Loc>(LeftV) &&
+            RHS->getType()->isIntegerType() && RightV.isUnknown()) {
+          RightV = svalBuilder.getConjuredSymbolVal(RHS, LCtx,
+                                                    RHS->getType(), Count);
+        }
+        if (isa<Loc>(RightV) &&
+            LHS->getType()->isIntegerType() && LeftV.isUnknown()) {
+          LeftV = svalBuilder.getConjuredSymbolVal(LHS, LCtx,
+                                                   LHS->getType(), Count);
+        }
+      }
+
       // Process non-assignments except commas or short-circuited
       // logical expressions (LAnd and LOr).
       SVal Result = evalBinOp(state, Op, LeftV, RightV, B->getType());      
@@ -162,14 +182,35 @@ void ExprEngine::VisitBlockExpr(const BlockExpr *BE, ExplodedNode *Pred,
                                 ExplodedNodeSet &Dst) {
   
   CanQualType T = getContext().getCanonicalType(BE->getType());
+
+  // Get the value of the block itself.
   SVal V = svalBuilder.getBlockPointer(BE->getBlockDecl(), T,
                                        Pred->getLocationContext());
+  
+  ProgramStateRef State = Pred->getState();
+  
+  // If we created a new MemRegion for the block, we should explicitly bind
+  // the captured variables.
+  if (const BlockDataRegion *BDR =
+      dyn_cast_or_null<BlockDataRegion>(V.getAsRegion())) {
+    
+    BlockDataRegion::referenced_vars_iterator I = BDR->referenced_vars_begin(),
+                                              E = BDR->referenced_vars_end();
+    
+    for (; I != E; ++I) {
+      const MemRegion *capturedR = I.getCapturedRegion();
+      const MemRegion *originalR = I.getOriginalRegion();
+      if (capturedR != originalR) {
+        SVal originalV = State->getSVal(loc::MemRegionVal(originalR));
+        State = State->bindLoc(loc::MemRegionVal(capturedR), originalV);
+      }
+    }
+  }
   
   ExplodedNodeSet Tmp;
   StmtNodeBuilder Bldr(Pred, Tmp, *currentBuilderContext);
   Bldr.generateNode(BE, Pred,
-                    Pred->getState()->BindExpr(BE, Pred->getLocationContext(),
-                                               V),
+                    State->BindExpr(BE, Pred->getLocationContext(), V),
                     false, 0,
                     ProgramPoint::PostLValueKind);
   
@@ -283,8 +324,51 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
         Bldr.generateNode(CastE, Pred, state);
         continue;
       }
-        // Various C++ casts that are not handled yet.
-      case CK_Dynamic:
+      // Handle C++ dyn_cast.
+      case CK_Dynamic: {
+        ProgramStateRef state = Pred->getState();
+        const LocationContext *LCtx = Pred->getLocationContext();
+        SVal val = state->getSVal(Ex, LCtx);
+
+        // Compute the type of the result.
+        QualType resultType = CastE->getType();
+        if (CastE->isLValue())
+          resultType = getContext().getPointerType(resultType);
+
+        bool Failed = false;
+
+        // Check if the value being cast evaluates to 0.
+        if (val.isZeroConstant())
+          Failed = true;
+        // Else, evaluate the cast.
+        else
+          val = getStoreManager().evalDynamicCast(val, T, Failed);
+
+        if (Failed) {
+          if (T->isReferenceType()) {
+            // A bad_cast exception is thrown if input value is a reference.
+            // Currently, we model this, by generating a sink.
+            Bldr.generateNode(CastE, Pred, state, true);
+            continue;
+          } else {
+            // If the cast fails on a pointer, bind to 0.
+            state = state->BindExpr(CastE, LCtx, svalBuilder.makeNull());
+          }
+        } else {
+          // If we don't know if the cast succeeded, conjure a new symbol.
+          if (val.isUnknown()) {
+            DefinedOrUnknownSVal NewSym = svalBuilder.getConjuredSymbolVal(NULL,
+                                 CastE, LCtx, resultType,
+                                 currentBuilderContext->getCurrentBlockCount());
+            state = state->BindExpr(CastE, LCtx, NewSym);
+          } else 
+            // Else, bind to the derived region value.
+            state = state->BindExpr(CastE, LCtx, val);
+        }
+        Bldr.generateNode(CastE, Pred, state);
+        continue;
+      }
+      // Various C++ casts that are not handled yet.
       case CK_ToUnion:
       case CK_BaseToDerived:
       case CK_NullToMemberPointer:
@@ -300,9 +384,8 @@ void ExprEngine::VisitCast(const CastExpr *CastE, const Expr *Ex,
         if (CastE->isLValue())
           resultType = getContext().getPointerType(resultType);
         const LocationContext *LCtx = Pred->getLocationContext();
-        SVal result =
-	  svalBuilder.getConjuredSymbolVal(NULL, CastE, LCtx, resultType,
-                               currentBuilderContext->getCurrentBlockCount());
+        SVal result = svalBuilder.getConjuredSymbolVal(NULL, CastE, LCtx,
+                    resultType, currentBuilderContext->getCurrentBlockCount());
         ProgramStateRef state = Pred->getState()->BindExpr(CastE, LCtx,
                                                                result);
         Bldr.generateNode(CastE, Pred, state);

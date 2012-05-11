@@ -131,7 +131,7 @@ private:
       UsedAsTypeAttr(false), IsAvailability(false), 
       NextInPosition(0), NextInPool(0) {
     if (numArgs) memcpy(getArgsBuffer(), args, numArgs * sizeof(Expr*));
-    AttrKind = getKind(getName());
+    AttrKind = getKind(getName(), getScopeName());
   }
 
   AttributeList(IdentifierInfo *attrName, SourceRange attrRange,
@@ -152,7 +152,7 @@ private:
     new (&getAvailabilitySlot(IntroducedSlot)) AvailabilityChange(introduced);
     new (&getAvailabilitySlot(DeprecatedSlot)) AvailabilityChange(deprecated);
     new (&getAvailabilitySlot(ObsoletedSlot)) AvailabilityChange(obsoleted);
-    AttrKind = getKind(getName());
+    AttrKind = getKind(getName(), getScopeName());
   }
 
   friend class AttributePool;
@@ -162,17 +162,6 @@ public:
   enum Kind {           
     #define PARSED_ATTR(NAME) AT_##NAME,
     #include "clang/Sema/AttrParsedAttrList.inc"
-    PARSED_ATTR(address_space)
-    PARSED_ATTR(base_check)
-    PARSED_ATTR(cf_returns_autoreleased)
-    PARSED_ATTR(ext_vector_type)
-    PARSED_ATTR(mode)
-    PARSED_ATTR(neon_polyvector_type)
-    PARSED_ATTR(neon_vector_type)
-    PARSED_ATTR(objc_gc)
-    PARSED_ATTR(objc_ownership)
-    PARSED_ATTR(opencl_image_access)
-    PARSED_ATTR(vector_size)
     #undef PARSED_ATTR
     IgnoredAttribute,
     UnknownAttribute
@@ -199,7 +188,7 @@ public:
   void setUsedAsTypeAttr() { UsedAsTypeAttr = true; }
 
   Kind getKind() const { return Kind(AttrKind); }
-  static Kind getKind(const IdentifierInfo *Name);
+  static Kind getKind(const IdentifierInfo *Name, const IdentifierInfo *Scope);
 
   AttributeList *getNext() const { return NextInPosition; }
   void setNext(AttributeList *N) { NextInPosition = N; }

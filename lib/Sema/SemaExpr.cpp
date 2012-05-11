@@ -374,10 +374,6 @@ ExprResult Sema::DefaultLvalueConversion(Expr *E) {
   QualType T = E->getType();
   assert(!T.isNull() && "r-value conversion on typeless expression?");
 
-  // We can't do lvalue-to-rvalue on atomics yet.
-  if (T->isAtomicType())
-    return Owned(E);
-
   // We don't want to throw lvalue-to-rvalue casts on top of
   // expressions of certain types in C++.
   if (getLangOpts().CPlusPlus &&
@@ -413,6 +409,15 @@ ExprResult Sema::DefaultLvalueConversion(Expr *E) {
   ExprResult Res = Owned(ImplicitCastExpr::Create(Context, T, CK_LValueToRValue,
                                                   E, 0, VK_RValue));
 
+  // C11 6.3.2.1p2:
+  //   ... if the lvalue has atomic type, the value has the non-atomic version 
+  //   of the type of the lvalue ...
+  if (const AtomicType *Atomic = T->getAs<AtomicType>()) {
+    T = Atomic->getValueType().getUnqualifiedType();
+    Res = Owned(ImplicitCastExpr::Create(Context, T, CK_AtomicToNonAtomic,
+                                         Res.get(), 0, VK_RValue));
+  }
+  
   return Res;
 }
 
@@ -555,7 +560,8 @@ ExprResult Sema::DefaultVariadicArgumentPromotion(Expr *E, VariadicCallType CT,
   // Complain about passing non-POD types through varargs. However, don't
   // perform this check for incomplete types, which we can get here when we're
   // in an unevaluated context.
-  if (!E->getType()->isIncompleteType() && !E->getType().isPODType(Context)) {
+  if (!E->getType()->isIncompleteType() &&
+      !E->getType().isCXX98PODType(Context)) {
     // C++0x [expr.call]p7:
     //   Passing a potentially-evaluated argument of class type (Clause 9) 
     //   having a non-trivial copy constructor, a non-trivial move constructor,
@@ -2642,7 +2648,12 @@ ExprResult Sema::ActOnNumericConstant(const Token &Tok, Scope *UDLScope) {
              diag::warn_cxx98_compat_longlong : diag::ext_longlong);
 
     // Get the value in the widest-possible width.
-    llvm::APInt ResultVal(Context.getTargetInfo().getIntMaxTWidth(), 0);
+    unsigned MaxWidth = Context.getTargetInfo().getIntMaxTWidth();
+    // The microsoft literal suffix extensions support 128-bit literals, which
+    // may be wider than [u]intmax_t.
+    if (Literal.isMicrosoftInteger && MaxWidth < 128)
+      MaxWidth = 128;
+    llvm::APInt ResultVal(MaxWidth, 0);
 
     if (Literal.GetIntegerValue(ResultVal)) {
       // If this value didn't fit into uintmax_t, warn and force to ull.
@@ -2690,7 +2701,7 @@ ExprResult Sema::ActOnNumericConstant(const Token &Tok, Scope *UDLScope) {
         }
       }
 
-      // Finally, check long long if needed.
+      // Check long long if needed.
       if (Ty.isNull()) {
         unsigned LongLongSize = Context.getTargetInfo().getLongLongWidth();
 
@@ -2706,6 +2717,16 @@ ExprResult Sema::ActOnNumericConstant(const Token &Tok, Scope *UDLScope) {
             Ty = Context.UnsignedLongLongTy;
           Width = LongLongSize;
         }
+      }
+        
+      // If it doesn't fit in unsigned long long, and we're using Microsoft
+      // extensions, then its a 128-bit integer literal.
+      if (Ty.isNull() && Literal.isMicrosoftInteger) {
+        if (Literal.isUnsigned)
+          Ty = Context.UnsignedInt128Ty;
+        else
+          Ty = Context.Int128Ty;
+        Width = 128;
       }
 
       // If we still couldn't decide a type, we probably have something that
@@ -2817,9 +2838,8 @@ bool Sema::CheckUnaryExprOrTypeTraitOperand(Expr *E,
     return false;
 
   if (RequireCompleteExprType(E,
-                              PDiag(diag::err_sizeof_alignof_incomplete_type)
-                              << ExprKind << E->getSourceRange(),
-                              std::make_pair(SourceLocation(), PDiag(0))))
+                              diag::err_sizeof_alignof_incomplete_type,
+                              ExprKind, E->getSourceRange()))
     return true;
 
   // Completeing the expression's type may have changed it.
@@ -2886,8 +2906,8 @@ bool Sema::CheckUnaryExprOrTypeTraitOperand(QualType ExprType,
     return false;
 
   if (RequireCompleteType(OpLoc, ExprType,
-                          PDiag(diag::err_sizeof_alignof_incomplete_type)
-                          << ExprKind << ExprRange))
+                          diag::err_sizeof_alignof_incomplete_type,
+                          ExprKind, ExprRange))
     return true;
 
   if (CheckObjCTraitOperandConstraints(*this, ExprType, OpLoc, ExprRange,
@@ -3225,8 +3245,7 @@ Sema::CreateBuiltinArraySubscriptExpr(Expr *Base, SourceLocation LLoc,
     if (!ResultType.hasQualifiers()) VK = VK_RValue;
   } else if (!ResultType->isDependentType() &&
       RequireCompleteType(LLoc, ResultType,
-                          PDiag(diag::err_subscript_incomplete_type)
-                            << BaseExpr->getSourceRange()))
+                          diag::err_subscript_incomplete_type, BaseExpr))
     return ExprError();
 
   // Diagnose bad cases where we step over interface counts.
@@ -3294,9 +3313,10 @@ ExprResult Sema::BuildCXXDefaultArgExpr(SourceLocation CallLoc,
     if (Result.isInvalid())
       return ExprError();
 
+    Expr *Arg = Result.takeAs<Expr>();
+    CheckImplicitConversions(Arg, Arg->getExprLoc());
     // Build the default argument expression.
-    return Owned(CXXDefaultArgExpr::Create(Context, CallLoc, Param,
-                                           Result.takeAs<Expr>()));
+    return Owned(CXXDefaultArgExpr::Create(Context, CallLoc, Param, Arg));
   }
 
   // If the default expression creates temporaries, we need to
@@ -3360,11 +3380,18 @@ Sema::ConvertArgumentsForCall(CallExpr *Call, Expr *Fn,
   // arguments for the remaining parameters), don't make the call.
   if (NumArgs < NumArgsInProto) {
     if (NumArgs < MinArgs) {
-      Diag(RParenLoc, MinArgs == NumArgsInProto
-                        ? diag::err_typecheck_call_too_few_args
-                        : diag::err_typecheck_call_too_few_args_at_least)
-        << FnKind
-        << MinArgs << NumArgs << Fn->getSourceRange();
+      if (MinArgs == 1 && FDecl && FDecl->getParamDecl(0)->getDeclName())
+        Diag(RParenLoc, MinArgs == NumArgsInProto && !Proto->isVariadic()
+                          ? diag::err_typecheck_call_too_few_args_one
+                          : diag::err_typecheck_call_too_few_args_at_least_one)
+          << FnKind
+          << FDecl->getParamDecl(0) << Fn->getSourceRange();
+      else
+        Diag(RParenLoc, MinArgs == NumArgsInProto && !Proto->isVariadic()
+                          ? diag::err_typecheck_call_too_few_args
+                          : diag::err_typecheck_call_too_few_args_at_least)
+          << FnKind
+          << MinArgs << NumArgs << Fn->getSourceRange();
 
       // Emit the location of the prototype.
       if (FDecl && !FDecl->getBuiltinID() && !IsExecConfig)
@@ -3443,8 +3470,7 @@ bool Sema::GatherArgumentsForCall(SourceLocation CallLoc,
 
       if (RequireCompleteType(Arg->getLocStart(),
                               ProtoArgType,
-                              PDiag(diag::err_call_incomplete_argument)
-                              << Arg->getSourceRange()))
+                              diag::err_call_incomplete_argument, Arg))
         return true;
 
       // Pass the argument
@@ -3887,8 +3913,7 @@ Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
       
       if (RequireCompleteType(Arg->getLocStart(),
                               Arg->getType(),
-                              PDiag(diag::err_call_incomplete_argument)
-                                << Arg->getSourceRange()))
+                              diag::err_call_incomplete_argument, Arg))
         return ExprError();
 
       TheCall->setArg(i, Arg);
@@ -3941,18 +3966,17 @@ Sema::BuildCompoundLiteralExpr(SourceLocation LParenLoc, TypeSourceInfo *TInfo,
 
   if (literalType->isArrayType()) {
     if (RequireCompleteType(LParenLoc, Context.getBaseElementType(literalType),
-             PDiag(diag::err_illegal_decl_array_incomplete_type)
-               << SourceRange(LParenLoc,
-                              LiteralExpr->getSourceRange().getEnd())))
+          diag::err_illegal_decl_array_incomplete_type,
+          SourceRange(LParenLoc,
+                      LiteralExpr->getSourceRange().getEnd())))
       return ExprError();
     if (literalType->isVariableArrayType())
       return ExprError(Diag(LParenLoc, diag::err_variable_object_no_init)
         << SourceRange(LParenLoc, LiteralExpr->getSourceRange().getEnd()));
   } else if (!literalType->isDependentType() &&
              RequireCompleteType(LParenLoc, literalType,
-                      PDiag(diag::err_typecheck_decl_incomplete_type)
-                        << SourceRange(LParenLoc,
-                                       LiteralExpr->getSourceRange().getEnd())))
+               diag::err_typecheck_decl_incomplete_type,
+               SourceRange(LParenLoc, LiteralExpr->getSourceRange().getEnd())))
     return ExprError();
 
   InitializedEntity Entity
@@ -5672,7 +5696,7 @@ Sema::CheckTransparentUnionArgumentConstraints(QualType ArgType,
       if (RHSType->isPointerType())
         if (RHSType->castAs<PointerType>()->getPointeeType()->isVoidType()) {
           RHS = ImpCastExprToType(RHS.take(), it->getType(), CK_BitCast);
-          InitField = *it;
+          InitField = &*it;
           break;
         }
 
@@ -5680,7 +5704,7 @@ Sema::CheckTransparentUnionArgumentConstraints(QualType ArgType,
                                            Expr::NPC_ValueDependentIsNull)) {
         RHS = ImpCastExprToType(RHS.take(), it->getType(),
                                 CK_NullToPointer);
-        InitField = *it;
+        InitField = &*it;
         break;
       }
     }
@@ -5689,7 +5713,7 @@ Sema::CheckTransparentUnionArgumentConstraints(QualType ArgType,
     if (CheckAssignmentConstraints(it->getType(), RHS, Kind)
           == Compatible) {
       RHS = ImpCastExprToType(RHS.take(), it->getType(), Kind);
-      InitField = *it;
+      InitField = &*it;
       break;
     }
   }
@@ -6037,8 +6061,8 @@ static bool checkArithmeticIncompletePointerType(Sema &S, SourceLocation Loc,
     QualType PointeeTy = Operand->getType()->getPointeeType();
     if (S.RequireCompleteType(
           Loc, PointeeTy,
-          S.PDiag(diag::err_typecheck_arithmetic_incomplete_type)
-            << PointeeTy << Operand->getSourceRange()))
+          diag::err_typecheck_arithmetic_incomplete_type,
+          PointeeTy, Operand->getSourceRange()))
       return true;
   }
   return false;
@@ -7143,16 +7167,6 @@ static bool IsReadonlyProperty(Expr *E, Sema &S) {
   return false;
 }
 
-static bool IsConstProperty(Expr *E, Sema &S) {
-  const ObjCPropertyRefExpr *PropExpr = dyn_cast<ObjCPropertyRefExpr>(E);
-  if (!PropExpr) return false;
-  if (PropExpr->isImplicitProperty()) return false;
-    
-  ObjCPropertyDecl *PDecl = PropExpr->getExplicitProperty();
-  QualType T = PDecl->getType().getNonReferenceType();
-  return T.isConstQualified();
-}
-
 static bool IsReadonlyMessage(Expr *E, Sema &S) {
   const MemberExpr *ME = dyn_cast<MemberExpr>(E);
   if (!ME) return false;
@@ -7192,13 +7206,12 @@ static NonConstCaptureKind isReferenceToNonConstCapture(Sema &S, Expr *E) {
 /// CheckForModifiableLvalue - Verify that E is a modifiable lvalue.  If not,
 /// emit an error and return true.  If so, return false.
 static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
+  assert(!E->hasPlaceholderType(BuiltinType::PseudoObject));
   SourceLocation OrigLoc = Loc;
   Expr::isModifiableLvalueResult IsLV = E->isModifiableLvalue(S.Context,
                                                               &Loc);
   if (IsLV == Expr::MLV_Valid && IsReadonlyProperty(E, S))
     IsLV = Expr::MLV_ReadonlyProperty;
-  else if (Expr::MLV_ConstQualified && IsConstProperty(E, S))
-    IsLV = Expr::MLV_Valid;
   else if (IsLV == Expr::MLV_ClassTemporary && IsReadonlyMessage(E, S))
     IsLV = Expr::MLV_InvalidMessageExpression;
   if (IsLV == Expr::MLV_Valid)
@@ -7277,8 +7290,7 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
   case Expr::MLV_IncompleteType:
   case Expr::MLV_IncompleteVoidType:
     return S.RequireCompleteType(Loc, E->getType(),
-              S.PDiag(diag::err_typecheck_incomplete_type_not_modifiable_lvalue)
-                  << E->getSourceRange());
+             diag::err_typecheck_incomplete_type_not_modifiable_lvalue, E);
   case Expr::MLV_DuplicateVectorComponents:
     Diag = diag::err_typecheck_duplicate_vector_components_not_mlvalue;
     break;
@@ -8675,8 +8687,7 @@ ExprResult Sema::BuildBuiltinOffsetOf(SourceLocation BuiltinLoc,
   // with an incomplete type would be ill-formed.
   if (!Dependent 
       && RequireCompleteType(BuiltinLoc, ArgTy,
-                             PDiag(diag::err_offsetof_incomplete_type)
-                               << TypeRange))
+                             diag::err_offsetof_incomplete_type, TypeRange))
     return ExprError();
   
   // offsetof with non-identifier designators (e.g. "offsetof(x, a.b[c])") are a
@@ -8749,10 +8760,18 @@ ExprResult Sema::BuildBuiltinOffsetOf(SourceLocation BuiltinLoc,
     //   The macro offsetof accepts a restricted set of type arguments in this
     //   International Standard. type shall be a POD structure or a POD union
     //   (clause 9).
+    // C++11 [support.types]p4:
+    //   If type is not a standard-layout class (Clause 9), the results are
+    //   undefined.
     if (CXXRecordDecl *CRD = dyn_cast<CXXRecordDecl>(RD)) {
-      if (!CRD->isPOD() && !DidWarnAboutNonPOD &&
+      bool IsSafe = LangOpts.CPlusPlus0x? CRD->isStandardLayout() : CRD->isPOD();
+      unsigned DiagID =
+        LangOpts.CPlusPlus0x? diag::warn_offsetof_non_standardlayout_type
+                            : diag::warn_offsetof_non_pod_type;
+
+      if (!IsSafe && !DidWarnAboutNonPOD &&
           DiagRuntimeBehavior(BuiltinLoc, 0,
-                              PDiag(diag::warn_offsetof_non_pod_type)
+                              PDiag(DiagID)
                               << SourceRange(CompPtr[0].LocStart, OC.LocEnd)
                               << CurrentType))
         DidWarnAboutNonPOD = true;
@@ -8856,8 +8875,9 @@ ExprResult Sema::ActOnChooseExpr(SourceLocation BuiltinLoc,
   } else {
     // The conditional expression is required to be a constant expression.
     llvm::APSInt condEval(32);
-    ExprResult CondICE = VerifyIntegerConstantExpression(CondExpr, &condEval,
-      PDiag(diag::err_typecheck_choose_expr_requires_constant), false);
+    ExprResult CondICE
+      = VerifyIntegerConstantExpression(CondExpr, &condEval,
+          diag::err_typecheck_choose_expr_requires_constant, false);
     if (CondICE.isInvalid())
       return ExprError();
     CondExpr = CondICE.take();
@@ -9117,15 +9137,6 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
 
   BSI->TheDecl->setBody(cast<CompoundStmt>(Body));
 
-  for (BlockDecl::capture_const_iterator ci = BSI->TheDecl->capture_begin(),
-       ce = BSI->TheDecl->capture_end(); ci != ce; ++ci) {
-    const VarDecl *variable = ci->getVariable();
-    QualType T = variable->getType();
-    QualType::DestructionKind destructKind = T.isDestructedType();
-    if (destructKind != QualType::DK_none)
-      getCurFunction()->setHasBranchProtectedScope();
-  }
-
   computeNRVO(Body, getCurBlock());
   
   BlockExpr *Result = new (Context) BlockExpr(BSI->TheDecl, BlockTy);
@@ -9133,10 +9144,23 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
   PopFunctionScopeInfo(&WP, Result->getBlockDecl(), Result);
 
   // If the block isn't obviously global, i.e. it captures anything at
-  // all, mark this full-expression as needing a cleanup.
+  // all, then we need to do a few things in the surrounding context:
   if (Result->getBlockDecl()->hasCaptures()) {
+    // First, this expression has a new cleanup object.
     ExprCleanupObjects.push_back(Result->getBlockDecl());
     ExprNeedsCleanups = true;
+
+    // It also gets a branch-protected scope if any of the captured
+    // variables needs destruction.
+    for (BlockDecl::capture_const_iterator
+           ci = Result->getBlockDecl()->capture_begin(),
+           ce = Result->getBlockDecl()->capture_end(); ci != ce; ++ci) {
+      const VarDecl *var = ci->getVariable();
+      if (var->getType().isDestructedType() != QualType::DK_none) {
+        getCurFunction()->setHasBranchProtectedScope();
+        break;
+      }
+    }
   }
 
   return Owned(Result);
@@ -9184,14 +9208,14 @@ ExprResult Sema::BuildVAArgExpr(SourceLocation BuiltinLoc,
 
   if (!TInfo->getType()->isDependentType()) {
     if (RequireCompleteType(TInfo->getTypeLoc().getBeginLoc(), TInfo->getType(),
-          PDiag(diag::err_second_parameter_to_va_arg_incomplete)
-          << TInfo->getTypeLoc().getSourceRange()))
+                            diag::err_second_parameter_to_va_arg_incomplete,
+                            TInfo->getTypeLoc()))
       return ExprError();
 
     if (RequireNonAbstractType(TInfo->getTypeLoc().getBeginLoc(),
-          TInfo->getType(),
-          PDiag(diag::err_second_parameter_to_va_arg_abstract)
-          << TInfo->getTypeLoc().getSourceRange()))
+                               TInfo->getType(),
+                               diag::err_second_parameter_to_va_arg_abstract,
+                               TInfo->getTypeLoc()))
       return ExprError();
 
     if (!TInfo->getType().isPODType(Context)) {
@@ -9436,14 +9460,44 @@ bool Sema::DiagnoseAssignmentResult(AssignConvertType ConvTy,
 
 ExprResult Sema::VerifyIntegerConstantExpression(Expr *E,
                                                  llvm::APSInt *Result) {
-  return VerifyIntegerConstantExpression(E, Result,
-      PDiag(diag::err_expr_not_ice) << LangOpts.CPlusPlus);
+  class SimpleICEDiagnoser : public VerifyICEDiagnoser {
+  public:
+    virtual void diagnoseNotICE(Sema &S, SourceLocation Loc, SourceRange SR) {
+      S.Diag(Loc, diag::err_expr_not_ice) << S.LangOpts.CPlusPlus << SR;
+    }
+  } Diagnoser;
+  
+  return VerifyIntegerConstantExpression(E, Result, Diagnoser);
 }
 
-ExprResult Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
-                                                 PartialDiagnostic NotIceDiag,
-                                                 bool AllowFold,
-                                                 PartialDiagnostic FoldDiag) {
+ExprResult Sema::VerifyIntegerConstantExpression(Expr *E,
+                                                 llvm::APSInt *Result,
+                                                 unsigned DiagID,
+                                                 bool AllowFold) {
+  class IDDiagnoser : public VerifyICEDiagnoser {
+    unsigned DiagID;
+    
+  public:
+    IDDiagnoser(unsigned DiagID)
+      : VerifyICEDiagnoser(DiagID == 0), DiagID(DiagID) { }
+    
+    virtual void diagnoseNotICE(Sema &S, SourceLocation Loc, SourceRange SR) {
+      S.Diag(Loc, DiagID) << SR;
+    }
+  } Diagnoser(DiagID);
+  
+  return VerifyIntegerConstantExpression(E, Result, Diagnoser, AllowFold);
+}
+
+void Sema::VerifyICEDiagnoser::diagnoseFold(Sema &S, SourceLocation Loc,
+                                            SourceRange SR) {
+  S.Diag(Loc, diag::ext_expr_not_ice) << SR << S.LangOpts.CPlusPlus;
+}
+
+ExprResult
+Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
+                                      VerifyICEDiagnoser &Diagnoser,
+                                      bool AllowFold) {
   SourceLocation DiagLoc = E->getLocStart();
 
   if (getLangOpts().CPlusPlus0x) {
@@ -9453,23 +9507,111 @@ ExprResult Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
     //   have a single non-explicit conversion function to an integral or
     //   unscoped enumeration type
     ExprResult Converted;
-    if (NotIceDiag.getDiagID()) {
-      Converted = ConvertToIntegralOrEnumerationType(
-        DiagLoc, E,
-        PDiag(diag::err_ice_not_integral),
-        PDiag(diag::err_ice_incomplete_type),
-        PDiag(diag::err_ice_explicit_conversion),
-        PDiag(diag::note_ice_conversion_here),
-        PDiag(diag::err_ice_ambiguous_conversion),
-        PDiag(diag::note_ice_conversion_here),
-        PDiag(0),
-        /*AllowScopedEnumerations*/ false);
+    if (!Diagnoser.Suppress) {
+      class CXX11ConvertDiagnoser : public ICEConvertDiagnoser {
+      public:
+        CXX11ConvertDiagnoser() : ICEConvertDiagnoser(false, true) { }
+        
+        virtual DiagnosticBuilder diagnoseNotInt(Sema &S, SourceLocation Loc,
+                                                 QualType T) {
+          return S.Diag(Loc, diag::err_ice_not_integral) << T;
+        }
+        
+        virtual DiagnosticBuilder diagnoseIncomplete(Sema &S,
+                                                     SourceLocation Loc,
+                                                     QualType T) {
+          return S.Diag(Loc, diag::err_ice_incomplete_type) << T;
+        }
+        
+        virtual DiagnosticBuilder diagnoseExplicitConv(Sema &S,
+                                                       SourceLocation Loc,
+                                                       QualType T,
+                                                       QualType ConvTy) {
+          return S.Diag(Loc, diag::err_ice_explicit_conversion) << T << ConvTy;
+        }
+        
+        virtual DiagnosticBuilder noteExplicitConv(Sema &S,
+                                                   CXXConversionDecl *Conv,
+                                                   QualType ConvTy) {
+          return S.Diag(Conv->getLocation(), diag::note_ice_conversion_here)
+                   << ConvTy->isEnumeralType() << ConvTy;
+        }
+        
+        virtual DiagnosticBuilder diagnoseAmbiguous(Sema &S, SourceLocation Loc,
+                                                    QualType T) {
+          return S.Diag(Loc, diag::err_ice_ambiguous_conversion) << T;
+        }
+        
+        virtual DiagnosticBuilder noteAmbiguous(Sema &S,
+                                                CXXConversionDecl *Conv,
+                                                QualType ConvTy) {
+          return S.Diag(Conv->getLocation(), diag::note_ice_conversion_here)
+                   << ConvTy->isEnumeralType() << ConvTy;
+        }
+        
+        virtual DiagnosticBuilder diagnoseConversion(Sema &S,
+                                                     SourceLocation Loc,
+                                                     QualType T,
+                                                     QualType ConvTy) {
+          return DiagnosticBuilder::getEmpty();
+        }
+      } ConvertDiagnoser;
+
+      Converted = ConvertToIntegralOrEnumerationType(DiagLoc, E,
+                                                     ConvertDiagnoser,
+                                             /*AllowScopedEnumerations*/ false);
     } else {
       // The caller wants to silently enquire whether this is an ICE. Don't
       // produce any diagnostics if it isn't.
-      Converted = ConvertToIntegralOrEnumerationType(
-        DiagLoc, E, PDiag(), PDiag(), PDiag(), PDiag(),
-        PDiag(), PDiag(), PDiag(), false);
+      class SilentICEConvertDiagnoser : public ICEConvertDiagnoser {
+      public:
+        SilentICEConvertDiagnoser() : ICEConvertDiagnoser(true, true) { }
+        
+        virtual DiagnosticBuilder diagnoseNotInt(Sema &S, SourceLocation Loc,
+                                                 QualType T) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder diagnoseIncomplete(Sema &S,
+                                                     SourceLocation Loc,
+                                                     QualType T) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder diagnoseExplicitConv(Sema &S,
+                                                       SourceLocation Loc,
+                                                       QualType T,
+                                                       QualType ConvTy) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder noteExplicitConv(Sema &S,
+                                                   CXXConversionDecl *Conv,
+                                                   QualType ConvTy) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder diagnoseAmbiguous(Sema &S, SourceLocation Loc,
+                                                    QualType T) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder noteAmbiguous(Sema &S,
+                                                CXXConversionDecl *Conv,
+                                                QualType ConvTy) {
+          return DiagnosticBuilder::getEmpty();
+        }
+        
+        virtual DiagnosticBuilder diagnoseConversion(Sema &S,
+                                                     SourceLocation Loc,
+                                                     QualType T,
+                                                     QualType ConvTy) {
+          return DiagnosticBuilder::getEmpty();
+        }
+      } ConvertDiagnoser;
+      
+      Converted = ConvertToIntegralOrEnumerationType(DiagLoc, E,
+                                                     ConvertDiagnoser, false);
     }
     if (Converted.isInvalid())
       return Converted;
@@ -9478,8 +9620,8 @@ ExprResult Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
       return ExprError();
   } else if (!E->getType()->isIntegralOrUnscopedEnumerationType()) {
     // An ICE must be of integral or unscoped enumeration type.
-    if (NotIceDiag.getDiagID())
-      Diag(DiagLoc, NotIceDiag) << E->getSourceRange();
+    if (!Diagnoser.Suppress)
+      Diagnoser.diagnoseNotICE(*this, DiagLoc, E->getSourceRange());
     return ExprError();
   }
 
@@ -9519,8 +9661,8 @@ ExprResult Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
   }
 
   if (!Folded || !AllowFold) {
-    if (NotIceDiag.getDiagID()) {
-      Diag(DiagLoc, NotIceDiag) << E->getSourceRange();
+    if (!Diagnoser.Suppress) {
+      Diagnoser.diagnoseNotICE(*this, DiagLoc, E->getSourceRange());
       for (unsigned I = 0, N = Notes.size(); I != N; ++I)
         Diag(Notes[I].first, Notes[I].second);
     }
@@ -9528,11 +9670,7 @@ ExprResult Sema::VerifyIntegerConstantExpression(Expr *E, llvm::APSInt *Result,
     return ExprError();
   }
 
-  if (FoldDiag.getDiagID())
-    Diag(DiagLoc, FoldDiag) << E->getSourceRange();
-  else
-    Diag(DiagLoc, diag::ext_expr_not_ice)
-      << E->getSourceRange() << LangOpts.CPlusPlus;
+  Diagnoser.diagnoseFold(*this, DiagLoc, E->getSourceRange());
   for (unsigned I = 0, N = Notes.size(); I != N; ++I)
     Diag(Notes[I].first, Notes[I].second);
 
@@ -9774,6 +9912,12 @@ void Sema::MarkFunctionReferenced(SourceLocation Loc, FunctionDecl *Func) {
   // Recursive functions should be marked when used from another function.
   // FIXME: Is this really right?
   if (CurContext == Func) return;
+
+  // Instantiate the exception specification for any function which is
+  // used: CodeGen will need it.
+  const FunctionProtoType *FPT = Func->getType()->getAs<FunctionProtoType>();
+  if (FPT && FPT->getExceptionSpecType() == EST_Uninstantiated)
+    InstantiateExceptionSpec(Loc, Func);
 
   // Implicit instantiation of function templates and member functions of
   // class templates.
@@ -10640,18 +10784,30 @@ bool Sema::CheckCallReturnType(QualType ReturnType, SourceLocation Loc,
     return false;
   }
 
-  PartialDiagnostic Note =
-    FD ? PDiag(diag::note_function_with_incomplete_return_type_declared_here)
-    << FD->getDeclName() : PDiag();
-  SourceLocation NoteLoc = FD ? FD->getLocation() : SourceLocation();
-
-  if (RequireCompleteType(Loc, ReturnType,
-                          FD ?
-                          PDiag(diag::err_call_function_incomplete_return)
-                            << CE->getSourceRange() << FD->getDeclName() :
-                          PDiag(diag::err_call_incomplete_return)
-                            << CE->getSourceRange(),
-                          std::make_pair(NoteLoc, Note)))
+  class CallReturnIncompleteDiagnoser : public TypeDiagnoser {
+    FunctionDecl *FD;
+    CallExpr *CE;
+    
+  public:
+    CallReturnIncompleteDiagnoser(FunctionDecl *FD, CallExpr *CE)
+      : FD(FD), CE(CE) { }
+    
+    virtual void diagnose(Sema &S, SourceLocation Loc, QualType T) {
+      if (!FD) {
+        S.Diag(Loc, diag::err_call_incomplete_return)
+          << T << CE->getSourceRange();
+        return;
+      }
+      
+      S.Diag(Loc, diag::err_call_function_incomplete_return)
+        << CE->getSourceRange() << FD->getDeclName() << T;
+      S.Diag(FD->getLocation(),
+             diag::note_function_with_incomplete_return_type_declared_here)
+        << FD->getDeclName();
+    }
+  } Diagnoser(FD, CE);
+  
+  if (RequireCompleteType(Loc, ReturnType, Diagnoser))
     return true;
 
   return false;

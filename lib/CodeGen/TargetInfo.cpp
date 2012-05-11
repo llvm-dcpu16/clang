@@ -161,7 +161,7 @@ static bool isEmptyRecord(ASTContext &Context, QualType T, bool AllowArrays) {
 
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i)
-    if (!isEmptyField(Context, *i, AllowArrays))
+    if (!isEmptyField(Context, &*i, AllowArrays))
       return false;
   return true;
 }
@@ -229,7 +229,7 @@ static const Type *isSingleElementStruct(QualType T, ASTContext &Context) {
   // Check for single element.
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i) {
-    const FieldDecl *FD = *i;
+    const FieldDecl *FD = &*i;
     QualType FT = FD->getType();
 
     // Ignore empty fields.
@@ -301,7 +301,7 @@ static bool canExpandIndirectArgument(QualType Ty, ASTContext &Context) {
 
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i) {
-    const FieldDecl *FD = *i;
+    const FieldDecl *FD = &*i;
 
     if (!is32Or64BitBasicType(FD->getType(), Context))
       return false;
@@ -534,7 +534,7 @@ bool X86_32ABIInfo::shouldReturnTypeInRegister(QualType Ty,
   // passed in a register.
   for (RecordDecl::field_iterator i = RT->getDecl()->field_begin(),
          e = RT->getDecl()->field_end(); i != e; ++i) {
-    const FieldDecl *FD = *i;
+    const FieldDecl *FD = &*i;
 
     // Empty fields are ignored.
     if (isEmptyField(Context, FD, true))
@@ -2411,6 +2411,64 @@ PPC32TargetCodeGenInfo::initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
   return false;
 }
 
+// PowerPC-64
+
+namespace {
+class PPC64TargetCodeGenInfo : public DefaultTargetCodeGenInfo {
+public:
+  PPC64TargetCodeGenInfo(CodeGenTypes &CGT) : DefaultTargetCodeGenInfo(CGT) {}
+
+  int getDwarfEHStackPointer(CodeGen::CodeGenModule &M) const {
+    // This is recovered from gcc output.
+    return 1; // r1 is the dedicated stack pointer
+  }
+
+  bool initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
+                               llvm::Value *Address) const;
+};
+
+}
+
+bool
+PPC64TargetCodeGenInfo::initDwarfEHRegSizeTable(CodeGen::CodeGenFunction &CGF,
+                                                llvm::Value *Address) const {
+  // This is calculated from the LLVM and GCC tables and verified
+  // against gcc output.  AFAIK all ABIs use the same encoding.
+
+  CodeGen::CGBuilderTy &Builder = CGF.Builder;
+
+  llvm::IntegerType *i8 = CGF.Int8Ty;
+  llvm::Value *Four8 = llvm::ConstantInt::get(i8, 4);
+  llvm::Value *Eight8 = llvm::ConstantInt::get(i8, 8);
+  llvm::Value *Sixteen8 = llvm::ConstantInt::get(i8, 16);
+
+  // 0-31: r0-31, the 8-byte general-purpose registers
+  AssignToArrayRange(Builder, Address, Eight8, 0, 31);
+
+  // 32-63: fp0-31, the 8-byte floating-point registers
+  AssignToArrayRange(Builder, Address, Eight8, 32, 63);
+
+  // 64-76 are various 4-byte special-purpose registers:
+  // 64: mq
+  // 65: lr
+  // 66: ctr
+  // 67: ap
+  // 68-75 cr0-7
+  // 76: xer
+  AssignToArrayRange(Builder, Address, Four8, 64, 76);
+
+  // 77-108: v0-31, the 16-byte vector registers
+  AssignToArrayRange(Builder, Address, Sixteen8, 77, 108);
+
+  // 109: vrsave
+  // 110: vscr
+  // 111: spe_acc
+  // 112: spefscr
+  // 113: sfp
+  AssignToArrayRange(Builder, Address, Four8, 109, 113);
+
+  return false;
+}
 
 //===----------------------------------------------------------------------===//
 // ARM ABI Implementation
@@ -2527,27 +2585,26 @@ void ARMABIInfo::computeInfo(CGFunctionInfo &FI) const {
 static bool isHomogeneousAggregate(QualType Ty, const Type *&Base,
                                    ASTContext &Context,
                                    uint64_t *HAMembers = 0) {
-  uint64_t Members;
+  uint64_t Members = 0;
   if (const ConstantArrayType *AT = Context.getAsConstantArrayType(Ty)) {
     if (!isHomogeneousAggregate(AT->getElementType(), Base, Context, &Members))
       return false;
     Members *= AT->getSize().getZExtValue();
   } else if (const RecordType *RT = Ty->getAs<RecordType>()) {
     const RecordDecl *RD = RT->getDecl();
-    if (RD->isUnion() || RD->hasFlexibleArrayMember())
+    if (RD->hasFlexibleArrayMember())
       return false;
-    if (const CXXRecordDecl *CXXRD = dyn_cast<CXXRecordDecl>(RD)) {
-      if (!CXXRD->isAggregate())
-        return false;
-    }
+
     Members = 0;
     for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
          i != e; ++i) {
-      const FieldDecl *FD = *i;
+      const FieldDecl *FD = &*i;
       uint64_t FldMembers;
       if (!isHomogeneousAggregate(FD->getType(), Base, Context, &FldMembers))
         return false;
-      Members += FldMembers;
+
+      Members = (RD->isUnion() ?
+                 std::max(Members, FldMembers) : Members + FldMembers);
     }
   } else {
     Members = 1;
@@ -2584,7 +2641,8 @@ static bool isHomogeneousAggregate(QualType Ty, const Type *&Base,
   // Homogeneous Aggregates can have at most 4 members of the base type.
   if (HAMembers)
     *HAMembers = Members;
-  return (Members <= 4);
+
+  return (Members > 0 && Members <= 4);
 }
 
 ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
@@ -2609,8 +2667,10 @@ ABIArgInfo ARMABIInfo::classifyArgumentType(QualType Ty) const {
   if (getABIKind() == ARMABIInfo::AAPCS_VFP) {
     // Homogeneous Aggregates need to be expanded.
     const Type *Base = 0;
-    if (isHomogeneousAggregate(Ty, Base, getContext()))
+    if (isHomogeneousAggregate(Ty, Base, getContext())) {
+      assert(Base && "Base class should be set for homogeneous aggregate");
       return ABIArgInfo::getExpand();
+    }
   }
 
   // Otherwise, pass by coercing to a structure of the appropriate size.
@@ -2681,7 +2741,7 @@ static bool isIntegerLikeType(QualType Ty, ASTContext &Context,
   unsigned idx = 0;
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
        i != e; ++i, ++idx) {
-    const FieldDecl *FD = *i;
+    const FieldDecl *FD = &*i;
 
     // Bit-fields are not addressable, we only need to verify they are "integer
     // like". We still have to disallow a subsequent non-bitfield, for example:
@@ -2776,9 +2836,11 @@ ABIArgInfo ARMABIInfo::classifyReturnType(QualType RetTy) const {
   // Check for homogeneous aggregates with AAPCS-VFP.
   if (getABIKind() == AAPCS_VFP) {
     const Type *Base = 0;
-    if (isHomogeneousAggregate(RetTy, Base, getContext()))
+    if (isHomogeneousAggregate(RetTy, Base, getContext())) {
+      assert(Base && "Base class should be set for homogeneous aggregate");
       // Homogeneous Aggregates are returned directly.
       return ABIArgInfo::getDirect();
+    }
   }
 
   // Aggregates <= 4 bytes are returned in r0; other aggregates
@@ -3157,7 +3219,7 @@ llvm::Type* MipsABIInfo::HandleAggregates(QualType Ty) const {
   // double fields.
   for (RecordDecl::field_iterator i = RD->field_begin(), e = RD->field_end();
        i != e; ++i, ++idx) {
-    const QualType Ty = (*i)->getType();
+    const QualType Ty = i->getType();
     const BuiltinType *BT = Ty->getAs<BuiltinType>();
 
     if (!BT || BT->getKind() != BuiltinType::Double)
@@ -3268,12 +3330,12 @@ MipsABIInfo::returnAggregateInRegs(QualType RetTy, uint64_t Size) const {
     if (FieldCnt && (FieldCnt <= 2) && !Layout.getFieldOffset(0)) {
       RecordDecl::field_iterator b = RD->field_begin(), e = RD->field_end();
       for (; b != e; ++b) {
-        const BuiltinType *BT = (*b)->getType()->getAs<BuiltinType>();
+        const BuiltinType *BT = b->getType()->getAs<BuiltinType>();
 
         if (!BT || !BT->isFloatingPoint())
           break;
 
-        RTList.push_back(CGT.ConvertType((*b)->getType()));
+        RTList.push_back(CGT.ConvertType(b->getType()));
       }
 
       if (b == e)
@@ -3662,6 +3724,8 @@ const TargetCodeGenInfo &CodeGenModule::getTargetCodeGenInfo() {
 
   case llvm::Triple::ppc:
     return *(TheTargetCodeGenInfo = new PPC32TargetCodeGenInfo(Types));
+  case llvm::Triple::ppc64:
+    return *(TheTargetCodeGenInfo = new PPC64TargetCodeGenInfo(Types));
 
   case llvm::Triple::ptx32:
   case llvm::Triple::ptx64:

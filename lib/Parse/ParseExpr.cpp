@@ -1287,7 +1287,12 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
       if (getLangOpts().ObjC1 && Tok.isAtStartOfLine() &&
           isSimpleObjCMessageExpression())
         return move(LHS);
-       
+
+      // Reject array indices starting with a lambda-expression. '[[' is
+      // reserved for attributes.
+      if (CheckProhibitedCXX11Attribute())
+        return ExprError();
+
       BalancedDelimiterTracker T(*this, tok::l_square);
       T.consumeOpen();
       Loc = T.getOpenLocation();
@@ -1756,6 +1761,9 @@ ExprResult Parser::ParseBuiltinPrimaryExpression() {
         Comps.back().LocEnd = ConsumeToken();
 
       } else if (Tok.is(tok::l_square)) {
+        if (CheckProhibitedCXX11Attribute())
+          return ExprError();
+
         // offsetof-member-designator: offsetof-member-design '[' expression ']'
         Comps.push_back(Sema::OffsetOfComponent());
         Comps.back().isBrackets = true;
@@ -1918,11 +1926,9 @@ Parser::ParseParenExpression(ParenParseOption &ExprType, bool stopIfCastExpr,
   // unless they've already reported an error.
   if (ExprType >= CompoundStmt && Tok.is(tok::l_brace)) {
     Diag(Tok, diag::ext_gnu_statement_expr);
-
     Actions.ActOnStartStmtExpr();
 
-    ParsedAttributes attrs(AttrFactory);
-    StmtResult Stmt(ParseCompoundStatement(attrs, true));
+    StmtResult Stmt(ParseCompoundStatement(true));
     ExprType = CompoundStmt;
 
     // If the substmt parsed correctly, build the AST node.

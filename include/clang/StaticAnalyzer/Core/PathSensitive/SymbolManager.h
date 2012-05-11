@@ -94,6 +94,8 @@ public:
     return symbol_iterator(this);
   }
   static symbol_iterator symbol_end() { return symbol_iterator(); }
+
+  unsigned computeComplexity() const;
 };
 
 typedef const SymExpr* SymbolRef;
@@ -553,6 +555,7 @@ public:
   BasicValueFactory &getBasicVals() { return BV; }
 };
 
+/// \brief A class responsible for cleaning up unused symbols.
 class SymbolReaper {
   enum SymbolStatus {
     NotProcessed,
@@ -576,6 +579,11 @@ class SymbolReaper {
   llvm::DenseMap<const MemRegion *, unsigned> includedRegionCache;
 
 public:
+  /// \brief Construct a reaper object, which removes everything which is not
+  /// live before we execute statement s in the given location context.
+  ///
+  /// If the statement is NULL, everything is this and parent contexts is
+  /// considered live.
   SymbolReaper(const LocationContext *ctx, const Stmt *s, SymbolManager& symmgr,
                StoreManager &storeMgr)
    : LCtx(ctx), Loc(s), SymMgr(symmgr), reapedStore(0, storeMgr) {}
@@ -583,7 +591,6 @@ public:
   ~SymbolReaper() {}
 
   const LocationContext *getLocationContext() const { return LCtx; }
-  const Stmt *getCurrentStatement() const { return Loc; }
 
   bool isLive(SymbolRef sym);
   bool isLiveRegion(const MemRegion *region);

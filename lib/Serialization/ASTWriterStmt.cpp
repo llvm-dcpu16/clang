@@ -106,6 +106,14 @@ void ASTStmtWriter::VisitLabelStmt(LabelStmt *S) {
   Code = serialization::STMT_LABEL;
 }
 
+void ASTStmtWriter::VisitAttributedStmt(AttributedStmt *S) {
+  VisitStmt(S);
+  Writer.WriteAttributes(S->getAttrs(), Record);
+  Writer.AddStmt(S->getSubStmt());
+  Writer.AddSourceLocation(S->getAttrLoc(), Record);
+  Code = serialization::STMT_ATTRIBUTED;
+}
+
 void ASTStmtWriter::VisitIfStmt(IfStmt *S) {
   VisitStmt(S);
   Writer.AddDeclRef(S->getConditionVariable(), Record);
@@ -751,14 +759,8 @@ void ASTStmtWriter::VisitPseudoObjectExpr(PseudoObjectExpr *E) {
 void ASTStmtWriter::VisitAtomicExpr(AtomicExpr *E) {
   VisitExpr(E);
   Record.push_back(E->getOp());
-  Writer.AddStmt(E->getPtr());
-  Writer.AddStmt(E->getOrder());
-  if (E->getOp() != AtomicExpr::Load)
-    Writer.AddStmt(E->getVal1());
-  if (E->isCmpXChg()) {
-    Writer.AddStmt(E->getOrderFail());
-    Writer.AddStmt(E->getVal2());
-  }
+  for (unsigned I = 0, N = E->getNumSubExprs(); I != N; ++I)
+    Writer.AddStmt(E->getSubExprs()[I]);
   Writer.AddSourceLocation(E->getBuiltinLoc(), Record);
   Writer.AddSourceLocation(E->getRParenLoc(), Record);
   Code = serialization::EXPR_ATOMIC;
@@ -775,12 +777,12 @@ void ASTStmtWriter::VisitObjCStringLiteral(ObjCStringLiteral *E) {
   Code = serialization::EXPR_OBJC_STRING_LITERAL;
 }
 
-void ASTStmtWriter::VisitObjCNumericLiteral(ObjCNumericLiteral *E) {
+void ASTStmtWriter::VisitObjCBoxedExpr(ObjCBoxedExpr *E) {
   VisitExpr(E);
-  Writer.AddStmt(E->getNumber());
-  Writer.AddDeclRef(E->getObjCNumericLiteralMethod(), Record);
-  Writer.AddSourceLocation(E->getAtLoc(), Record);
-  Code = serialization::EXPR_OBJC_NUMERIC_LITERAL;
+  Writer.AddStmt(E->getSubExpr());
+  Writer.AddDeclRef(E->getBoxingMethod(), Record);
+  Writer.AddSourceRange(E->getSourceRange(), Record);
+  Code = serialization::EXPR_OBJC_BOXED_EXPRESSION;
 }
 
 void ASTStmtWriter::VisitObjCArrayLiteral(ObjCArrayLiteral *E) {
@@ -1043,6 +1045,7 @@ void ASTStmtWriter::VisitMSDependentExistsStmt(MSDependentExistsStmt *S) {
 void ASTStmtWriter::VisitCXXOperatorCallExpr(CXXOperatorCallExpr *E) {
   VisitCallExpr(E);
   Record.push_back(E->getOperator());
+  Writer.AddSourceRange(E->Range, Record);
   Code = serialization::EXPR_CXX_OPERATOR_CALL;
 }
 

@@ -51,6 +51,7 @@ using namespace clang;
 using namespace clang::cxcursor;
 using namespace clang::cxstring;
 using namespace clang::cxtu;
+using namespace clang::cxindex;
 
 CXTranslationUnit cxtu::MakeCXTranslationUnit(CIndexer *CIdx, ASTUnit *TU) {
   if (!TU)
@@ -60,6 +61,7 @@ CXTranslationUnit cxtu::MakeCXTranslationUnit(CIndexer *CIdx, ASTUnit *TU) {
   D->TUData = TU;
   D->StringPool = createCXStringPool();
   D->Diagnostics = 0;
+  D->OverridenCursorsPool = createOverridenCXCursorsPool();
   return D;
 }
 
@@ -111,10 +113,11 @@ CXSourceRange cxloc::translateSourceRange(const SourceManager &SM,
   // We want the last character in this location, so we will adjust the
   // location accordingly.
   SourceLocation EndLoc = R.getEnd();
-  if (EndLoc.isValid() && EndLoc.isMacroID())
+  if (EndLoc.isValid() && EndLoc.isMacroID() && !SM.isMacroArgExpansion(EndLoc))
     EndLoc = SM.getExpansionRange(EndLoc).second;
-  if (R.isTokenRange() && !EndLoc.isInvalid() && EndLoc.isFileID()) {
-    unsigned Length = Lexer::MeasureTokenLength(EndLoc, SM, LangOpts);
+  if (R.isTokenRange() && !EndLoc.isInvalid()) {
+    unsigned Length = Lexer::MeasureTokenLength(SM.getSpellingLoc(EndLoc),
+                                                SM, LangOpts);
     EndLoc = EndLoc.getLocWithOffset(Length);
   }
 
@@ -2482,7 +2485,7 @@ clang_createTranslationUnitFromSourceFile(CXIndex CIdx,
                                     unsaved_files, num_unsaved_files,
                                     Options);
 }
-  
+
 struct ParseTranslationUnitInfo {
   CXIndex CIdx;
   const char *source_filename;
@@ -2519,7 +2522,8 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
     = (options & CXTranslationUnit_Incomplete)? TU_Prefix : TU_Complete;
   bool CacheCodeCompetionResults
     = options & CXTranslationUnit_CacheCompletionResults;
-  
+  bool SkipFunctionBodies = options & CXTranslationUnit_SkipFunctionBodies;
+
   // Configure the diagnostics.
   DiagnosticOptions DiagOpts;
   IntrusiveRefCntPtr<DiagnosticsEngine>
@@ -2587,6 +2591,7 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   }
   
   unsigned NumErrors = Diags->getClient()->getNumErrors();
+  OwningPtr<ASTUnit> ErrUnit;
   OwningPtr<ASTUnit> Unit(
     ASTUnit::LoadFromCommandLine(Args->size() ? &(*Args)[0] : 0 
                                  /* vector::data() not portable */,
@@ -2601,27 +2606,14 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
                                  PrecompilePreamble,
                                  TUKind,
                                  CacheCodeCompetionResults,
-                                 /*AllowPCHWithCompilerErrors=*/true));
+                                 /*AllowPCHWithCompilerErrors=*/true,
+                                 SkipFunctionBodies,
+                                 &ErrUnit));
 
   if (NumErrors != Diags->getClient()->getNumErrors()) {
     // Make sure to check that 'Unit' is non-NULL.
-    if (CXXIdx->getDisplayDiagnostics() && Unit.get()) {
-      for (ASTUnit::stored_diag_iterator D = Unit->stored_diag_begin(), 
-                                      DEnd = Unit->stored_diag_end();
-           D != DEnd; ++D) {
-        CXStoredDiagnostic Diag(*D, Unit->getASTContext().getLangOpts());
-        CXString Msg = clang_formatDiagnostic(&Diag,
-                                    clang_defaultDiagnosticDisplayOptions());
-        fprintf(stderr, "%s\n", clang_getCString(Msg));
-        clang_disposeString(Msg);
-      }
-#ifdef LLVM_ON_WIN32
-      // On Windows, force a flush, since there may be multiple copies of
-      // stderr and stdout in the file system, all with different buffers
-      // but writing to the same device.
-      fflush(stderr);
-#endif
-    }
+    if (CXXIdx->getDisplayDiagnostics())
+      printDiagsToStderr(Unit ? Unit.get() : ErrUnit.get());
   }
 
   PTUI->result = MakeCXTranslationUnit(CXXIdx, Unit.take());
@@ -2743,6 +2735,7 @@ void clang_disposeTranslationUnit(CXTranslationUnit CTUnit) {
     delete static_cast<ASTUnit *>(CTUnit->TUData);
     disposeCXStringPool(CTUnit->StringPool);
     delete static_cast<CXDiagnosticSetImpl *>(CTUnit->Diagnostics);
+    disposeOverridenCXCursorsPool(CTUnit->OverridenCursorsPool);
     delete CTUnit;
   }
 }
@@ -2838,8 +2831,8 @@ CXString clang_getTranslationUnitSpelling(CXTranslationUnit CTUnit) {
 }
 
 CXCursor clang_getTranslationUnitCursor(CXTranslationUnit TU) {
-  CXCursor Result = { CXCursor_TranslationUnit, 0, { 0, 0, TU } };
-  return Result;
+  ASTUnit *CXXUnit = static_cast<ASTUnit*>(TU->TUData);
+  return MakeCXCursor(CXXUnit->getASTContext().getTranslationUnitDecl(), TU);
 }
 
 } // end: extern "C"
@@ -3203,6 +3196,18 @@ CXSourceRange clang_Cursor_getSpellingNameRange(CXCursor C,
         return clang_getNullRange();
       return cxloc::translateSourceRange(Ctx, MD->getSelectorLoc(pieceIndex));
     }
+  }
+
+  if (C.kind == CXCursor_ObjCCategoryDecl ||
+      C.kind == CXCursor_ObjCCategoryImplDecl) {
+    if (pieceIndex > 0)
+      return clang_getNullRange();
+    if (ObjCCategoryDecl *
+          CD = dyn_cast_or_null<ObjCCategoryDecl>(getCursorDecl(C)))
+      return cxloc::translateSourceRange(Ctx, CD->getCategoryNameLoc());
+    if (ObjCCategoryImplDecl *
+          CID = dyn_cast_or_null<ObjCCategoryImplDecl>(getCursorDecl(C)))
+      return cxloc::translateSourceRange(Ctx, CID->getCategoryNameLoc());
   }
 
   // FIXME: A CXCursor_InclusionDirective should give the location of the
@@ -3629,9 +3634,29 @@ static enum CXChildVisitResult GetCursorVisitor(CXCursor cursor,
   
   if (clang_isDeclaration(cursor.kind)) {
     // Avoid having the implicit methods override the property decls.
-    if (ObjCMethodDecl *MD = dyn_cast_or_null<ObjCMethodDecl>(getCursorDecl(cursor)))
+    if (ObjCMethodDecl *MD
+          = dyn_cast_or_null<ObjCMethodDecl>(getCursorDecl(cursor))) {
       if (MD->isImplicit())
         return CXChildVisit_Break;
+
+    } else if (ObjCInterfaceDecl *ID
+                 = dyn_cast_or_null<ObjCInterfaceDecl>(getCursorDecl(cursor))) {
+      // Check that when we have multiple @class references in the same line,
+      // that later ones do not override the previous ones.
+      // If we have:
+      // @class Foo, Bar;
+      // source ranges for both start at '@', so 'Bar' will end up overriding
+      // 'Foo' even though the cursor location was at 'Foo'.
+      if (BestCursor->kind == CXCursor_ObjCInterfaceDecl ||
+          BestCursor->kind == CXCursor_ObjCClassRef)
+        if (ObjCInterfaceDecl *PrevID
+             = dyn_cast_or_null<ObjCInterfaceDecl>(getCursorDecl(*BestCursor))){
+         if (PrevID != ID &&
+             !PrevID->isThisDeclarationADefinition() &&
+             !ID->isThisDeclarationADefinition())
+           return CXChildVisit_Break;
+        }
+    }
   }
 
   if (clang_isExpression(cursor.kind) &&
@@ -5464,6 +5489,90 @@ enum CXAvailabilityKind clang_getCursorAvailability(CXCursor cursor) {
   return CXAvailability_Available;
 }
 
+static CXVersion convertVersion(VersionTuple In) {
+  CXVersion Out = { -1, -1, -1 };
+  if (In.empty())
+    return Out;
+
+  Out.Major = In.getMajor();
+  
+  if (llvm::Optional<unsigned> Minor = In.getMinor())
+    Out.Minor = *Minor;
+  else
+    return Out;
+
+  if (llvm::Optional<unsigned> Subminor = In.getSubminor())
+    Out.Subminor = *Subminor;
+  
+  return Out;
+}
+  
+int clang_getCursorPlatformAvailability(CXCursor cursor,
+                                        int *always_deprecated,
+                                        CXString *deprecated_message,
+                                        int *always_unavailable,
+                                        CXString *unavailable_message,
+                                        CXPlatformAvailability *availability,
+                                        int availability_size) {
+  if (always_deprecated)
+    *always_deprecated = 0;
+  if (deprecated_message)
+    *deprecated_message = cxstring::createCXString("", /*DupString=*/false);
+  if (always_unavailable)
+    *always_unavailable = 0;
+  if (unavailable_message)
+    *unavailable_message = cxstring::createCXString("", /*DupString=*/false);
+  
+  if (!clang_isDeclaration(cursor.kind))
+    return 0;
+  
+  Decl *D = cxcursor::getCursorDecl(cursor);
+  if (!D)
+    return 0;
+  
+  int N = 0;
+  for (Decl::attr_iterator A = D->attr_begin(), AEnd = D->attr_end(); A != AEnd;
+       ++A) {
+    if (DeprecatedAttr *Deprecated = dyn_cast<DeprecatedAttr>(*A)) {
+      if (always_deprecated)
+        *always_deprecated = 1;
+      if (deprecated_message)
+        *deprecated_message = cxstring::createCXString(Deprecated->getMessage());
+      continue;
+    }
+    
+    if (UnavailableAttr *Unavailable = dyn_cast<UnavailableAttr>(*A)) {
+      if (always_unavailable)
+        *always_unavailable = 1;
+      if (unavailable_message) {
+        *unavailable_message
+          = cxstring::createCXString(Unavailable->getMessage());
+      }
+      continue;
+    }
+    
+    if (AvailabilityAttr *Avail = dyn_cast<AvailabilityAttr>(*A)) {
+      if (N < availability_size) {
+        availability[N].Platform
+          = cxstring::createCXString(Avail->getPlatform()->getName());
+        availability[N].Introduced = convertVersion(Avail->getIntroduced());
+        availability[N].Deprecated = convertVersion(Avail->getDeprecated());
+        availability[N].Obsoleted = convertVersion(Avail->getObsoleted());
+        availability[N].Unavailable = Avail->getUnavailable();
+        availability[N].Message = cxstring::createCXString(Avail->getMessage());
+      }
+      ++N;
+    }
+  }
+  
+  return N;
+}
+  
+void clang_disposeCXPlatformAvailability(CXPlatformAvailability *availability) {
+  clang_disposeString(availability->Platform);
+  clang_disposeString(availability->Message);
+}
+
 CXLanguageKind clang_getCursorLanguage(CXCursor cursor) {
   if (clang_isDeclaration(cursor.kind))
     return getDeclLanguage(cxcursor::getCursorDecl(cursor));
@@ -5524,32 +5633,6 @@ CXCursor clang_getCursorLexicalParent(CXCursor cursor) {
   // FIXME: Note that we can't easily compute the lexical context of a 
   // statement or expression, so we return nothing.
   return clang_getNullCursor();
-}
-
-void clang_getOverriddenCursors(CXCursor cursor, 
-                                CXCursor **overridden,
-                                unsigned *num_overridden) {
-  if (overridden)
-    *overridden = 0;
-  if (num_overridden)
-    *num_overridden = 0;
-  if (!overridden || !num_overridden)
-    return;
-
-  SmallVector<CXCursor, 8> Overridden;
-  cxcursor::getOverriddenCursors(cursor, Overridden);
-
-  // Don't allocate memory if we have no overriden cursors.
-  if (Overridden.size() == 0)
-    return;
-
-  *num_overridden = Overridden.size();
-  *overridden = new CXCursor [Overridden.size()];
-  std::copy(Overridden.begin(), Overridden.end(), *overridden);
-}
-
-void clang_disposeOverriddenCursors(CXCursor *overridden) {
-  delete [] overridden;
 }
 
 CXFile clang_getIncludedFile(CXCursor cursor) {
@@ -5817,6 +5900,27 @@ void clang::setThreadBackgroundPriority() {
   // FIXME: Move to llvm/Support and make it cross-platform.
 #ifdef __APPLE__
   setpriority(PRIO_DARWIN_THREAD, 0, PRIO_DARWIN_BG);
+#endif
+}
+
+void cxindex::printDiagsToStderr(ASTUnit *Unit) {
+  if (!Unit)
+    return;
+
+  for (ASTUnit::stored_diag_iterator D = Unit->stored_diag_begin(), 
+                                  DEnd = Unit->stored_diag_end();
+       D != DEnd; ++D) {
+    CXStoredDiagnostic Diag(*D, Unit->getASTContext().getLangOpts());
+    CXString Msg = clang_formatDiagnostic(&Diag,
+                                clang_defaultDiagnosticDisplayOptions());
+    fprintf(stderr, "%s\n", clang_getCString(Msg));
+    clang_disposeString(Msg);
+  }
+#ifdef LLVM_ON_WIN32
+  // On Windows, force a flush, since there may be multiple copies of
+  // stderr and stdout in the file system, all with different buffers
+  // but writing to the same device.
+  fflush(stderr);
 #endif
 }
 

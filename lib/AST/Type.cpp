@@ -288,6 +288,28 @@ QualType QualType::IgnoreParens(QualType T) {
   return T;
 }
 
+/// \brief This will check for a TypedefType by removing any existing sugar
+/// until it reaches a TypedefType or a non-sugared type.
+template <> const TypedefType *Type::getAs() const {
+  const Type *Cur = this;
+
+  while (true) {
+    if (const TypedefType *TDT = dyn_cast<TypedefType>(Cur))
+      return TDT;
+    switch (Cur->getTypeClass()) {
+#define ABSTRACT_TYPE(Class, Parent)
+#define TYPE(Class, Parent) \
+    case Class: { \
+      const Class##Type *Ty = cast<Class##Type>(Cur); \
+      if (!Ty->isSugared()) return 0; \
+      Cur = Ty->desugar().getTypePtr(); \
+      break; \
+    }
+#include "clang/AST/TypeNodes.def"
+    }
+  }
+}
+
 /// getUnqualifiedDesugaredType - Pull any qualifiers and syntactic
 /// sugar off the given type.  This should produce an object of the
 /// same dynamic type as the canonical type.
@@ -895,6 +917,14 @@ bool Type::isIncompleteType(NamedDecl **Def) const {
 }
 
 bool QualType::isPODType(ASTContext &Context) const {
+  // C++11 has a more relaxed definition of POD.
+  if (Context.getLangOpts().CPlusPlus0x)
+    return isCXX11PODType(Context);
+
+  return isCXX98PODType(Context);
+}
+
+bool QualType::isCXX98PODType(ASTContext &Context) const {
   // The compiler shouldn't query this for incomplete types, but the user might.
   // We return false for that case. Except for incomplete arrays of PODs, which
   // are PODs according to the standard.
@@ -902,7 +932,7 @@ bool QualType::isPODType(ASTContext &Context) const {
     return 0;
   
   if ((*this)->isIncompleteArrayType())
-    return Context.getBaseElementType(*this).isPODType(Context);
+    return Context.getBaseElementType(*this).isCXX98PODType(Context);
     
   if ((*this)->isIncompleteType())
     return false;
@@ -929,7 +959,7 @@ bool QualType::isPODType(ASTContext &Context) const {
   case Type::VariableArray:
   case Type::ConstantArray:
     // IncompleteArray is handled above.
-    return Context.getBaseElementType(*this).isPODType(Context);
+    return Context.getBaseElementType(*this).isCXX98PODType(Context);
         
   case Type::ObjCObjectPointer:
   case Type::BlockPointer:
@@ -1417,7 +1447,7 @@ const char *Type::getTypeClassName() const {
   llvm_unreachable("Invalid type class.");
 }
 
-const char *BuiltinType::getName(const PrintingPolicy &Policy) const {
+StringRef BuiltinType::getName(const PrintingPolicy &Policy) const {
   switch (getKind()) {
   case Void:              return "void";
   case Bool:              return Policy.Bool ? "bool" : "_Bool";
@@ -1546,6 +1576,14 @@ FunctionProtoType::FunctionProtoType(QualType result, const QualType *args,
       else if (epi.NoexceptExpr->isInstantiationDependent())
         setInstantiationDependent();
     }
+  } else if (getExceptionSpecType() == EST_Uninstantiated) {
+    // Store the function decl from which we will resolve our
+    // exception specification.
+    FunctionDecl **slot = reinterpret_cast<FunctionDecl**>(argSlot + numArgs);
+    slot[0] = epi.ExceptionSpecDecl;
+    slot[1] = epi.ExceptionSpecTemplate;
+    // This exception specification doesn't make the type dependent, because
+    // it's not instantiated as part of instantiating the type.
   }
 
   if (epi.ConsumedArguments) {
@@ -1629,6 +1667,8 @@ void FunctionProtoType::Profile(llvm::FoldingSetNodeID &ID, QualType Result,
       ID.AddPointer(epi.Exceptions[i].getAsOpaquePtr());
   } else if (epi.ExceptionSpecType == EST_ComputedNoexcept && epi.NoexceptExpr){
     epi.NoexceptExpr->Profile(ID, Context, false);
+  } else if (epi.ExceptionSpecType == EST_Uninstantiated) {
+    ID.AddPointer(epi.ExceptionSpecDecl->getCanonicalDecl());
   }
   if (epi.ConsumedArguments) {
     for (unsigned i = 0; i != NumArgs; ++i)

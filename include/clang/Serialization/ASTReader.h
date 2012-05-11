@@ -170,6 +170,9 @@ class ReadMethodPoolVisitor;
 
 namespace reader {
   class ASTIdentifierLookupTrait;
+  /// \brief The on-disk hash table used for the DeclContext's Name lookup table.
+  typedef OnDiskChainedHashTable<ASTDeclContextNameLookupTrait>
+    ASTDeclContextNameLookupTable;
 }
 
 } // end namespace serialization
@@ -323,7 +326,9 @@ private:
   // TU, and when we read those update records, the actual context will not
   // be available yet (unless it's the TU), so have this pending map using the
   // ID as a key. It will be realized when the context is actually loaded.
-  typedef SmallVector<std::pair<void *, ModuleFile*>, 1> DeclContextVisibleUpdates;
+  typedef
+    SmallVector<std::pair<serialization::reader::ASTDeclContextNameLookupTable *,
+                          ModuleFile*>, 1> DeclContextVisibleUpdates;
   typedef llvm::DenseMap<serialization::DeclID, DeclContextVisibleUpdates>
       DeclContextVisibleUpdatesPending;
 
@@ -586,11 +591,14 @@ private:
   /// indicates how many separate module file load operations have occurred.
   unsigned CurrentGeneration;
 
+  typedef llvm::DenseMap<unsigned, SwitchCase *> SwitchCaseMapTy;
   /// \brief Mapping from switch-case IDs in the chain to switch-case statements
   ///
   /// Statements usually don't have IDs, but switch cases need them, so that the
   /// switch statement can refer to them.
-  std::map<unsigned, SwitchCase *> SwitchCaseStmts;
+  SwitchCaseMapTy SwitchCaseStmts;
+
+  SwitchCaseMapTy *CurrSwitchCaseStmts;
 
   /// \brief The number of stat() calls that hit/missed the stat
   /// cache.
@@ -1467,7 +1475,7 @@ public:
                      llvm::DenseMap<IdentifierInfo *, uint64_t>::iterator Pos);
 
   /// \brief Load all external visible decls in the given DeclContext.
-  void completeVisibleDeclsMap(DeclContext *DC);
+  void completeVisibleDeclsMap(const DeclContext *DC);
 
   /// \brief Retrieve the AST context that this AST reader supplements.
   ASTContext &getContext() { return Context; }

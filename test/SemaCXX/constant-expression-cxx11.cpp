@@ -615,6 +615,10 @@ static_assert(agg1.arr[4] == 0, "");
 static_assert(agg1.arr[5] == 0, ""); // expected-error {{constant expression}} expected-note {{read of dereferenced one-past-the-end}}
 static_assert(agg1.p == nullptr, "");
 
+static constexpr const unsigned char uc[] = { "foo" };
+static_assert(uc[0] == 'f', "");
+static_assert(uc[3] == 0, "");
+
 namespace SimpleDerivedClass {
 
 struct B {
@@ -1243,4 +1247,14 @@ namespace Vector {
     return (VD4) { n / 2.0, n + 1.5, n - 5.4, n * 0.9 }; // expected-warning {{C99}}
   }
   constexpr auto v2 = g(4);
+}
+
+// PR12626, redux
+namespace InvalidClasses {
+  void test0() {
+    struct X; // expected-note {{forward declaration}}
+    struct Y { bool b; X x; }; // expected-error {{field has incomplete type}}
+    Y y;
+    auto& b = y.b;
+  }
 }

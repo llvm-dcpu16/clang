@@ -14,7 +14,6 @@
 #ifndef LLVM_CLANG_FRONTEND_ASTUNIT_H
 #define LLVM_CLANG_FRONTEND_ASTUNIT_H
 
-#include "clang/Index/ASTLocation.h"
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/CodeCompleteConsumer.h"
@@ -46,6 +45,7 @@ class ASTContext;
 class ASTReader;
 class CodeCompleteConsumer;
 class CompilerInvocation;
+class CompilerInstance;
 class Decl;
 class DiagnosticsEngine;
 class FileEntry;
@@ -56,16 +56,6 @@ class SourceManager;
 class TargetInfo;
 class ASTFrontendAction;
 
-using namespace idx;
-  
-/// \brief Allocator for a cached set of global code completions.
-class GlobalCodeCompletionAllocator 
-  : public CodeCompletionAllocator,
-    public RefCountedBase<GlobalCodeCompletionAllocator>
-{
-
-};
-  
 /// \brief Utility class for loading a ASTContext from an AST file.
 ///
 class ASTUnit : public ModuleLoader {
@@ -141,15 +131,16 @@ private:
   /// The name of the original source file used to generate this ASTUnit.
   std::string OriginalSourceFile;
 
-  // Critical optimization when using clang_getCursor().
-  ASTLocation LastLoc;
-
   /// \brief The set of diagnostics produced when creating the preamble.
   SmallVector<StoredDiagnostic, 4> PreambleDiagnostics;
 
   /// \brief The set of diagnostics produced when creating this
   /// translation unit.
   SmallVector<StoredDiagnostic, 4> StoredDiagnostics;
+
+  /// \brief The set of diagnostics produced when failing to parse, e.g. due
+  /// to failure to load the PCH.
+  SmallVector<StoredDiagnostic, 4> FailedParseDiagnostics;
 
   /// \brief The number of stored diagnostics that come from the driver
   /// itself.
@@ -324,25 +315,20 @@ public:
   getCachedCompletionAllocator() {
     return CachedCompletionAllocator;
   }
-  
-  /// \brief Retrieve the allocator used to cache global code completions.
-  /// Creates the allocator if it doesn't already exist.
-  IntrusiveRefCntPtr<GlobalCodeCompletionAllocator>
-  getCursorCompletionAllocator() {
-    if (!CursorCompletionAllocator.getPtr()) {
-      CursorCompletionAllocator = new GlobalCodeCompletionAllocator;
-    }
-    return CursorCompletionAllocator;
+
+  CodeCompletionTUInfo &getCodeCompletionTUInfo() {
+    if (!CCTUInfo)
+      CCTUInfo.reset(new CodeCompletionTUInfo(
+                                            new GlobalCodeCompletionAllocator));
+    return *CCTUInfo;
   }
-  
+
 private:
   /// \brief Allocator used to store cached code completions.
   IntrusiveRefCntPtr<GlobalCodeCompletionAllocator>
     CachedCompletionAllocator;
   
-  /// \brief Allocator used to store code completions for arbitrary cursors.
-  IntrusiveRefCntPtr<GlobalCodeCompletionAllocator>
-    CursorCompletionAllocator;
+  OwningPtr<CodeCompletionTUInfo> CCTUInfo;
 
   /// \brief The set of cached code-completion results.
   std::vector<CachedCodeCompletionResult> CachedCompletionResults;
@@ -397,7 +383,11 @@ private:
                                                      bool AllowRebuild = true,
                                                         unsigned MaxLines = 0);
   void RealizeTopLevelDeclsFromPreamble();
-  
+
+  /// \brief Transfers ownership of the objects (like SourceManager) from
+  /// \param CI to this ASTUnit.
+  void transferASTDataFromCompilerInstance(CompilerInstance &CI);
+
   /// \brief Allows us to assert that ASTUnit is not being used concurrently,
   /// which is not supported.
   ///
@@ -477,10 +467,6 @@ public:
 
   bool getOwnsRemappedFileBuffers() const { return OwnsRemappedFileBuffers; }
   void setOwnsRemappedFileBuffers(bool val) { OwnsRemappedFileBuffers = val; }
-
-  void setLastASTLocation(ASTLocation ALoc) { LastLoc = ALoc; }
-  ASTLocation getLastASTLocation() const { return LastLoc; }
-
 
   StringRef getMainFileName() const;
 
@@ -676,6 +662,13 @@ public:
   /// \param Persistent - if true the returned ASTUnit will be complete.
   /// false means the caller is only interested in getting info through the
   /// provided \see Action.
+  ///
+  /// \param ErrAST - If non-null and parsing failed without any AST to return
+  /// (e.g. because the PCH could not be loaded), this accepts the ASTUnit
+  /// mainly to allow the caller to see the diagnostics.
+  /// This will only receive an ASTUnit if a new one was created. If an already
+  /// created ASTUnit was passed in \param Unit then the caller can check that.
+  ///
   static ASTUnit *LoadFromCompilerInvocationAction(CompilerInvocation *CI,
                               IntrusiveRefCntPtr<DiagnosticsEngine> Diags,
                                              ASTFrontendAction *Action = 0,
@@ -685,7 +678,8 @@ public:
                                              bool OnlyLocalDecls = false,
                                              bool CaptureDiagnostics = false,
                                              bool PrecompilePreamble = false,
-                                       bool CacheCodeCompletionResults = false);
+                                       bool CacheCodeCompletionResults = false,
+                                       OwningPtr<ASTUnit> *ErrAST = 0);
 
   /// LoadFromCompilerInvocation - Create an ASTUnit from a source file, via a
   /// CompilerInvocation object.
@@ -717,7 +711,11 @@ public:
   /// lifetime is expected to extend past that of the returned ASTUnit.
   ///
   /// \param ResourceFilesPath - The path to the compiler resource files.
-  //
+  ///
+  /// \param ErrAST - If non-null and parsing failed without any AST to return
+  /// (e.g. because the PCH could not be loaded), this accepts the ASTUnit
+  /// mainly to allow the caller to see the diagnostics.
+  ///
   // FIXME: Move OnlyLocalDecls, UseBumpAllocator to setters on the ASTUnit, we
   // shouldn't need to specify them at construction time.
   static ASTUnit *LoadFromCommandLine(const char **ArgBegin,
@@ -732,7 +730,9 @@ public:
                                       bool PrecompilePreamble = false,
                                       TranslationUnitKind TUKind = TU_Complete,
                                       bool CacheCodeCompletionResults = false,
-                                      bool AllowPCHWithCompilerErrors = false);
+                                      bool AllowPCHWithCompilerErrors = false,
+                                      bool SkipFunctionBodies = false,
+                                      OwningPtr<ASTUnit> *ErrAST = 0);
   
   /// \brief Reparse the source files using the same command-line options that
   /// were originally used to produce this translation unit.

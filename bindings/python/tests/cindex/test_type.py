@@ -1,5 +1,4 @@
 from clang.cindex import CursorKind
-from clang.cindex import Index
 from clang.cindex import TypeKind
 from nose.tools import raises
 from .util import get_cursor
@@ -108,6 +107,14 @@ def test_equal():
 
     assert a.type != None
     assert a.type != 'foo'
+
+def test_typekind_spelling():
+    """Ensure TypeKind.spelling works."""
+    tu = get_tu('int a;')
+    a = get_cursor(tu, 'a')
+
+    assert a is not None
+    assert a.type.kind.spelling == 'Int'
 
 def test_function_argument_types():
     """Ensure that Type.argument_types() works as expected."""
@@ -256,7 +263,7 @@ def test_is_volatile_qualified():
 def test_is_restrict_qualified():
     """Ensure Type.is_restrict_qualified works."""
 
-    tu = get_tu('struct s { void * restrict i; void * j };')
+    tu = get_tu('struct s { void * restrict i; void * j; };')
 
     i = get_cursor(tu, 'i')
     j = get_cursor(tu, 'j')

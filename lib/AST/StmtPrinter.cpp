@@ -169,6 +169,23 @@ void StmtPrinter::VisitLabelStmt(LabelStmt *Node) {
   PrintStmt(Node->getSubStmt(), 0);
 }
 
+void StmtPrinter::VisitAttributedStmt(AttributedStmt *Node) {
+  OS << "[[";
+  bool first = true;
+  for (AttrVec::const_iterator it = Node->getAttrs().begin(),
+                               end = Node->getAttrs().end();
+                               it != end; ++it) {
+    if (!first) {
+      OS << ", ";
+      first = false;
+    }
+    // TODO: check this
+    (*it)->printPretty(OS, Context);
+  }
+  OS << "]] ";
+  PrintStmt(Node->getSubStmt(), 0);
+}
+
 void StmtPrinter::PrintRawIfStmt(IfStmt *If) {
   OS << "if (";
   PrintExpr(If->getCond());
@@ -725,7 +742,7 @@ void StmtPrinter::VisitStringLiteral(StringLiteral *Str) {
   case StringLiteral::UTF32: OS << 'U'; break;
   }
   OS << '"';
-  static char Hex[] = "0123456789ABCDEF";
+  static const char Hex[] = "0123456789ABCDEF";
 
   unsigned LastSlashX = Str->getLength();
   for (unsigned I = 0, N = Str->getLength(); I != N; ++I) {
@@ -1108,52 +1125,34 @@ void StmtPrinter::VisitPseudoObjectExpr(PseudoObjectExpr *Node) {
 void StmtPrinter::VisitAtomicExpr(AtomicExpr *Node) {
   const char *Name = 0;
   switch (Node->getOp()) {
-    case AtomicExpr::Init:
-      Name = "__atomic_init(";
-      break;
-    case AtomicExpr::Load:
-      Name = "__atomic_load(";
-      break;
-    case AtomicExpr::Store:
-      Name = "__atomic_store(";
-      break;
-    case AtomicExpr::CmpXchgStrong:
-      Name = "__atomic_compare_exchange_strong(";
-      break;
-    case AtomicExpr::CmpXchgWeak:
-      Name = "__atomic_compare_exchange_weak(";
-      break;
-    case AtomicExpr::Xchg:
-      Name = "__atomic_exchange(";
-      break;
-    case AtomicExpr::Add:
-      Name = "__atomic_fetch_add(";
-      break;
-    case AtomicExpr::Sub:
-      Name = "__atomic_fetch_sub(";
-      break;
-    case AtomicExpr::And:
-      Name = "__atomic_fetch_and(";
-      break;
-    case AtomicExpr::Or:
-      Name = "__atomic_fetch_or(";
-      break;
-    case AtomicExpr::Xor:
-      Name = "__atomic_fetch_xor(";
-      break;
+#define BUILTIN(ID, TYPE, ATTRS)
+#define ATOMIC_BUILTIN(ID, TYPE, ATTRS) \
+  case AtomicExpr::AO ## ID: \
+    Name = #ID "("; \
+    break;
+#include "clang/Basic/Builtins.def"
   }
   OS << Name;
+
+  // AtomicExpr stores its subexpressions in a permuted order.
   PrintExpr(Node->getPtr());
   OS << ", ";
-  if (Node->getOp() != AtomicExpr::Load) {
+  if (Node->getOp() != AtomicExpr::AO__c11_atomic_load &&
+      Node->getOp() != AtomicExpr::AO__atomic_load_n) {
     PrintExpr(Node->getVal1());
     OS << ", ";
   }
-  if (Node->isCmpXChg()) {
+  if (Node->getOp() == AtomicExpr::AO__atomic_exchange ||
+      Node->isCmpXChg()) {
     PrintExpr(Node->getVal2());
     OS << ", ";
   }
-  if (Node->getOp() != AtomicExpr::Init)
+  if (Node->getOp() == AtomicExpr::AO__atomic_compare_exchange ||
+      Node->getOp() == AtomicExpr::AO__atomic_compare_exchange_n) {
+    PrintExpr(Node->getWeak());
+    OS << ", ";
+  }
+  if (Node->getOp() != AtomicExpr::AO__c11_atomic_init)
     PrintExpr(Node->getOrder());
   if (Node->isCmpXChg()) {
     OS << ", ";
@@ -1728,9 +1727,9 @@ void StmtPrinter::VisitObjCStringLiteral(ObjCStringLiteral *Node) {
   VisitStringLiteral(Node->getString());
 }
 
-void StmtPrinter::VisitObjCNumericLiteral(ObjCNumericLiteral *E) {
+void StmtPrinter::VisitObjCBoxedExpr(ObjCBoxedExpr *E) {
   OS << "@";
-  Visit(E->getNumber());
+  Visit(E->getSubExpr());
 }
 
 void StmtPrinter::VisitObjCArrayLiteral(ObjCArrayLiteral *E) {

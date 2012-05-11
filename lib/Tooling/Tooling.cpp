@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/Tooling/ArgumentsAdjusters.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Driver/Compilation.h"
@@ -26,8 +27,18 @@
 #include "llvm/Support/Host.h"
 #include "llvm/Support/raw_ostream.h"
 
+// For chdir, see the comment in ClangTool::run for more information.
+#ifdef _WIN32
+#  include <direct.h>
+#else
+#  include <unistd.h>
+#endif
+
 namespace clang {
 namespace tooling {
+
+// Exists solely for the purpose of lookup of the resource path.
+static int StaticSymbol;
 
 FrontendActionFactory::~FrontendActionFactory() {}
 
@@ -39,9 +50,20 @@ FrontendActionFactory::~FrontendActionFactory() {}
 static clang::driver::Driver *newDriver(clang::DiagnosticsEngine *Diagnostics,
                                         const char *BinaryName) {
   const std::string DefaultOutputName = "a.out";
+  // This just needs to be some symbol in the binary.
+  void *const SymbolAddr = &StaticSymbol;
+  // The driver detects the builtin header path based on the path of
+  // the executable.
+  // FIXME: On linux, GetMainExecutable is independent of the content
+  // of BinaryName, thus allowing ClangTool and runToolOnCode to just
+  // pass in made-up names here (in the case of ClangTool this being
+  // the original compiler invocation). Make sure this works on other
+  // platforms.
+  llvm::sys::Path MainExecutable =
+    llvm::sys::Path::GetMainExecutable(BinaryName, SymbolAddr);
   clang::driver::Driver *CompilerDriver = new clang::driver::Driver(
-      BinaryName, llvm::sys::getDefaultTargetTriple(),
-      DefaultOutputName, false, *Diagnostics);
+    MainExecutable.str(), llvm::sys::getDefaultTargetTriple(),
+    DefaultOutputName, false, *Diagnostics);
   CompilerDriver->setTitle("clang_based_tool");
   return CompilerDriver;
 }
@@ -171,9 +193,6 @@ bool ToolInvocation::run() {
                        Invocation.take(), *CC1Args, ToolAction.take());
 }
 
-// Exists solely for the purpose of lookup of the resource path.
-static int StaticSymbol;
-
 bool ToolInvocation::runInvocation(
     const char *BinaryName,
     clang::driver::Compilation *Compilation,
@@ -235,25 +254,23 @@ void ToolInvocation::addFileMappingsTo(SourceManager &Sources) {
 
 ClangTool::ClangTool(const CompilationDatabase &Compilations,
                      ArrayRef<std::string> SourcePaths)
-    : Files((FileSystemOptions())) {
+    : Files((FileSystemOptions())),
+      ArgsAdjuster(new ClangSyntaxOnlyAdjuster()) {
   llvm::SmallString<1024> BaseDirectory;
-  llvm::sys::fs::current_path(BaseDirectory);
+  if (const char *PWD = ::getenv("PWD"))
+    BaseDirectory = PWD;
+  else
+    llvm::sys::fs::current_path(BaseDirectory);
   for (unsigned I = 0, E = SourcePaths.size(); I != E; ++I) {
     llvm::SmallString<1024> File(getAbsolutePath(
         SourcePaths[I], BaseDirectory));
 
-    std::vector<CompileCommand> CompileCommands =
+    std::vector<CompileCommand> CompileCommandsForFile =
       Compilations.getCompileCommands(File.str());
-    if (!CompileCommands.empty()) {
-      for (int I = 0, E = CompileCommands.size(); I != E; ++I) {
-        CompileCommand &Command = CompileCommands[I];
-        if (!Command.Directory.empty()) {
-          // FIXME: What should happen if CommandLine includes -working-directory
-          // as well?
-          Command.CommandLine.push_back(
-            "-working-directory=" + Command.Directory);
-        }
-        CommandLines.push_back(std::make_pair(File.str(), Command.CommandLine));
+    if (!CompileCommandsForFile.empty()) {
+      for (int I = 0, E = CompileCommandsForFile.size(); I != E; ++I) {
+        CompileCommands.push_back(std::make_pair(File.str(),
+                                  CompileCommandsForFile[I]));
       }
     } else {
       // FIXME: There are two use cases here: doing a fuzzy
@@ -270,11 +287,26 @@ void ClangTool::mapVirtualFile(StringRef FilePath, StringRef Content) {
   MappedFileContents.push_back(std::make_pair(FilePath, Content));
 }
 
+void ClangTool::setArgumentsAdjuster(ArgumentsAdjuster *Adjuster) {
+  ArgsAdjuster.reset(Adjuster);
+}
+
 int ClangTool::run(FrontendActionFactory *ActionFactory) {
   bool ProcessingFailed = false;
-  for (unsigned I = 0; I < CommandLines.size(); ++I) {
-    std::string File = CommandLines[I].first;
-    std::vector<std::string> &CommandLine = CommandLines[I].second;
+  for (unsigned I = 0; I < CompileCommands.size(); ++I) {
+    std::string File = CompileCommands[I].first;
+    // FIXME: chdir is thread hostile; on the other hand, creating the same
+    // behavior as chdir is complex: chdir resolves the path once, thus
+    // guaranteeing that all subsequent relative path operations work
+    // on the same path the original chdir resulted in. This makes a difference
+    // for example on network filesystems, where symlinks might be switched 
+    // during runtime of the tool. Fixing this depends on having a file system
+    // abstraction that allows openat() style interactions.
+    if (chdir(CompileCommands[I].second.Directory.c_str()))
+      llvm::report_fatal_error("Cannot chdir into \"" +
+                               CompileCommands[I].second.Directory + "\n!");
+    std::vector<std::string> CommandLine =
+      ArgsAdjuster->Adjust(CompileCommands[I].second.CommandLine);
     llvm::outs() << "Processing: " << File << ".\n";
     ToolInvocation Invocation(CommandLine, ActionFactory->create(), &Files);
     for (int I = 0, E = MappedFileContents.size(); I != E; ++I) {
