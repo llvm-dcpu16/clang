@@ -34,12 +34,13 @@ using namespace CodeGen;
 //===--------------------------------------------------------------------===//
 
 llvm::Value *CodeGenFunction::EmitCastToVoidPtr(llvm::Value *value) {
+  unsigned BitsPerByte = getContext().getTargetInfo().getCharWidth();
   unsigned addressSpace =
     cast<llvm::PointerType>(value->getType())->getAddressSpace();
 
-  llvm::PointerType *destType = Int8PtrTy;
-  if (addressSpace)
-    destType = llvm::Type::getInt8PtrTy(getLLVMContext(), addressSpace);
+  llvm::PointerType *destType = llvm::Type::getIntNPtrTy(getLLVMContext(),
+                                                         BitsPerByte,
+                                                         addressSpace);
 
   if (value->getType() == destType) return value;
   return Builder.CreateBitCast(value, destType);

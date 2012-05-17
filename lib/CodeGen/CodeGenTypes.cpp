@@ -311,11 +311,13 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     case BuiltinType::Void:
     case BuiltinType::ObjCId:
     case BuiltinType::ObjCClass:
-    case BuiltinType::ObjCSel:
+    case BuiltinType::ObjCSel: {
       // LLVM void type can only be used as the result of a function call.  Just
       // map to the same as char.
-      ResultType = llvm::Type::getInt8Ty(getLLVMContext());
+      unsigned BitsPerByte = getTargetData().getBitsPerByte();
+      ResultType = llvm::Type::getIntNTy(getLLVMContext(), BitsPerByte);
       break;
+    }
 
     case BuiltinType::Bool:
       // Note that we always return bool as i1 for use as a scalar type.
@@ -357,10 +359,12 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
                                     Context.getFloatTypeSemantics(T));
       break;
 
-    case BuiltinType::NullPtr:
+    case BuiltinType::NullPtr: {
       // Model std::nullptr_t as i8*
-      ResultType = llvm::Type::getInt8PtrTy(getLLVMContext());
+      unsigned BitsPerByte = getTargetData().getBitsPerByte();
+      ResultType = llvm::Type::getIntNPtrTy(getLLVMContext(), BitsPerByte);
       break;
+    }
         
     case BuiltinType::UInt128:
     case BuiltinType::Int128:
@@ -394,8 +398,10 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     const PointerType *PTy = cast<PointerType>(Ty);
     QualType ETy = PTy->getPointeeType();
     llvm::Type *PointeeType = ConvertTypeForMem(ETy);
-    if (PointeeType->isVoidTy())
-      PointeeType = llvm::Type::getInt8Ty(getLLVMContext());
+    if (PointeeType->isVoidTy()) {
+      unsigned BitsPerByte = getTargetData().getBitsPerByte();
+      PointeeType = llvm::Type::getIntNTy(getLLVMContext(), BitsPerByte);
+    }
     unsigned AS = Context.getTargetAddressSpace(ETy);
     ResultType = llvm::PointerType::get(PointeeType, AS);
     break;
@@ -418,8 +424,9 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     // unsized (e.g. an incomplete struct) just use [0 x i8].
     ResultType = ConvertTypeForMem(A->getElementType());
     if (!ResultType->isSized()) {
+      unsigned BitsPerByte = getTargetData().getBitsPerByte();
       SkippedLayout = true;
-      ResultType = llvm::Type::getInt8Ty(getLLVMContext());
+      ResultType = llvm::Type::getIntNTy(getLLVMContext(), BitsPerByte);
     }
     ResultType = llvm::ArrayType::get(ResultType, 0);
     break;
@@ -431,8 +438,9 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     // Lower arrays of undefined struct type to arrays of i8 just to have a 
     // concrete type.
     if (!EltTy->isSized()) {
+      unsigned BitsPerByte = getTargetData().getBitsPerByte();
       SkippedLayout = true;
-      EltTy = llvm::Type::getInt8Ty(getLLVMContext());
+      EltTy = llvm::Type::getIntNTy(getLLVMContext(), BitsPerByte);
     }
 
     ResultType = llvm::ArrayType::get(EltTy, A->getSize().getZExtValue());
