@@ -2651,6 +2651,12 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   }
 #endif
 
+  // Default to -fno-builtin on DCPU16
+  if (getToolChain().getTriple().getArch() == llvm::Triple::dcpu16) {
+    if (!Args.hasArg(options::OPT_fbuiltin))
+      CmdArgs.push_back("-fno-builtin");
+  }
+
   // Only allow -traditional or -traditional-cpp outside in preprocessing modes.
   if (Arg *A = Args.getLastArg(options::OPT_traditional,
                                options::OPT_traditional_cpp)) {
