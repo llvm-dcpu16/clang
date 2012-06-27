@@ -14,10 +14,10 @@
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
-#include "clang/Driver/ObjCRuntime.h"
 #include "clang/Driver/OptTable.h"
 #include "clang/Driver/Option.h"
 #include "clang/Driver/Options.h"
+#include "clang/Basic/ObjCRuntime.h"
 #include "clang/Basic/Version.h"
 
 #include "llvm/ADT/SmallString.h"
@@ -42,9 +42,7 @@ using namespace clang;
 /// Darwin - Darwin tool chain for i386 and x86_64.
 
 Darwin::Darwin(const Driver &D, const llvm::Triple& Triple)
-  : ToolChain(D, Triple), TargetInitialized(false),
-    ARCRuntimeForSimulator(ARCSimulator_None),
-    LibCXXForSimulator(LibCXXSimulator_None)
+  : ToolChain(D, Triple), TargetInitialized(false)
 {
   // Compute the initial Darwin version from the triple
   unsigned Major, Minor, Micro;
@@ -80,42 +78,19 @@ bool Darwin::HasNativeLLVMSupport() const {
   return true;
 }
 
-bool Darwin::hasARCRuntime() const {
-  // FIXME: Remove this once there is a proper way to detect an ARC runtime
-  // for the simulator.
-  switch (ARCRuntimeForSimulator) {
-  case ARCSimulator_None:
-    break;
-  case ARCSimulator_HasARCRuntime:
-    return true;
-  case ARCSimulator_NoARCRuntime:
-    return false;
-  }
-
-  if (isTargetIPhoneOS())
-    return !isIPhoneOSVersionLT(5);
-  else
-    return !isMacosxVersionLT(10, 7);
-}
-
-bool Darwin::hasSubscriptingRuntime() const {
-    return !isTargetIPhoneOS() && !isMacosxVersionLT(10, 8);
-}
-
 /// Darwin provides an ARC runtime starting in MacOS X 10.7 and iOS 5.0.
-void Darwin::configureObjCRuntime(ObjCRuntime &runtime) const {
-  if (runtime.getKind() != ObjCRuntime::NeXT)
-    return ToolChain::configureObjCRuntime(runtime);
-
-  runtime.HasARC = runtime.HasWeak = hasARCRuntime();
-  runtime.HasSubscripting = hasSubscriptingRuntime();
-
-  // So far, objc_terminate is only available in iOS 5.
-  // FIXME: do the simulator logic properly.
-  if (!ARCRuntimeForSimulator && isTargetIPhoneOS())
-    runtime.HasTerminate = !isIPhoneOSVersionLT(5);
-  else
-    runtime.HasTerminate = false;
+ObjCRuntime Darwin::getDefaultObjCRuntime(bool isNonFragile) const {
+  if (isTargetIPhoneOS()) {
+    return ObjCRuntime(ObjCRuntime::iOS, TargetVersion);
+  } else if (TargetSimulatorVersionFromDefines != VersionTuple()) {
+    return ObjCRuntime(ObjCRuntime::iOS, TargetSimulatorVersionFromDefines);
+  } else {
+    if (isNonFragile) {
+      return ObjCRuntime(ObjCRuntime::MacOSX, TargetVersion);
+    } else {
+      return ObjCRuntime(ObjCRuntime::FragileMacOSX, TargetVersion);
+    }
+  }
 }
 
 /// Darwin provides a blocks runtime starting in MacOS X 10.6 and iOS 3.2.
@@ -199,21 +174,25 @@ void Generic_ELF::anchor() {}
 
 Tool &Darwin::SelectTool(const Compilation &C, const JobAction &JA,
                          const ActionList &Inputs) const {
-  Action::ActionClass Key;
+  Action::ActionClass Key = JA.getKind();
+  bool useClang = false;
 
   if (getDriver().ShouldUseClangCompiler(C, JA, getTriple())) {
+    useClang = true;
     // Fallback to llvm-gcc for i386 kext compiles, we don't support that ABI.
-    if (Inputs.size() == 1 &&
+    if (!getDriver().shouldForceClangUse() &&
+        Inputs.size() == 1 &&
         types::isCXX(Inputs[0]->getType()) &&
         getTriple().isOSDarwin() &&
         getTriple().getArch() == llvm::Triple::x86 &&
         (C.getArgs().getLastArg(options::OPT_fapple_kext) ||
          C.getArgs().getLastArg(options::OPT_mkernel)))
-      Key = JA.getKind();
-    else
-      Key = Action::AnalyzeJobClass;
-  } else
-    Key = JA.getKind();
+      useClang = false;
+  }
+
+  // FIXME: This seems like a hacky way to choose clang frontend.
+  if (useClang)
+    Key = Action::AnalyzeJobClass;
 
   bool UseIntegratedAs = C.getArgs().hasFlag(options::OPT_integrated_as,
                                              options::OPT_no_integrated_as,
@@ -309,7 +288,7 @@ void DarwinClang::AddLinkARCArgs(const ArgList &Args,
   else if (isTargetIPhoneOS())
     s += "iphoneos";
   // FIXME: Remove this once we depend fully on -mios-simulator-version-min.
-  else if (ARCRuntimeForSimulator != ARCSimulator_None)
+  else if (TargetSimulatorVersionFromDefines != VersionTuple())
     s += "iphonesimulator";
   else
     s += "macosx";
@@ -480,10 +459,7 @@ void Darwin::AddDeploymentTarget(DerivedArgList &Args) const {
         unsigned Major = 0, Minor = 0, Micro = 0;
         if (GetVersionFromSimulatorDefine(define, Major, Minor, Micro) &&
             Major < 10 && Minor < 100 && Micro < 100) {
-          ARCRuntimeForSimulator = Major < 5 ? ARCSimulator_NoARCRuntime
-                                             : ARCSimulator_HasARCRuntime;
-          LibCXXForSimulator = Major < 5 ? LibCXXSimulator_NotAvailable
-                                         : LibCXXSimulator_Available;
+          TargetSimulatorVersionFromDefines = VersionTuple(Major, Minor, Micro);
         }
         break;
       }
@@ -897,22 +873,21 @@ DerivedArgList *Darwin::TranslateArgs(const DerivedArgList &Args,
   // Validate the C++ standard library choice.
   CXXStdlibType Type = GetCXXStdlibType(*DAL);
   if (Type == ToolChain::CST_Libcxx) {
-    switch (LibCXXForSimulator) {
-    case LibCXXSimulator_None:
-      // Handle non-simulator cases.
-      if (isTargetIPhoneOS()) {
-        if (isIPhoneOSVersionLT(5, 0)) {
-          getDriver().Diag(clang::diag::err_drv_invalid_libcxx_deployment)
-            << "iOS 5.0";
-        }
-      }
-      break;
-    case LibCXXSimulator_NotAvailable:
+    // Check whether the target provides libc++.
+    StringRef where;
+
+    // Complain about targetting iOS < 5.0 in any way.
+    if (TargetSimulatorVersionFromDefines != VersionTuple()) {
+      if (TargetSimulatorVersionFromDefines < VersionTuple(5, 0))
+        where = "iOS 5.0";
+    } else if (isTargetIPhoneOS()) {
+      if (isIPhoneOSVersionLT(5, 0))
+        where = "iOS 5.0";
+    }
+
+    if (where != StringRef()) {
       getDriver().Diag(clang::diag::err_drv_invalid_libcxx_deployment)
-        << "iOS 5.0";
-      break;
-    case LibCXXSimulator_Available:
-      break;
+        << where;
     }
   }
 
@@ -1146,7 +1121,8 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(
     "i586-redhat-linux",
     "i386-redhat-linux",
     "i586-suse-linux",
-    "i486-slackware-linux"
+    "i486-slackware-linux",
+    "i686-montavista-linux"
   };
 
   static const char *const MIPSLibDirs[] = { "/lib" };
@@ -1163,7 +1139,8 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(
   static const char *const PPCTriples[] = {
     "powerpc-linux-gnu",
     "powerpc-unknown-linux-gnu",
-    "powerpc-suse-linux"
+    "powerpc-suse-linux",
+    "powerpc-montavista-linuxspe"
   };
   static const char *const PPC64LibDirs[] = { "/lib64", "/lib" };
   static const char *const PPC64Triples[] = {
@@ -2110,6 +2087,12 @@ Tool &Linux::SelectTool(const Compilation &C, const JobAction &JA,
   return *T;
 }
 
+void Linux::addClangTargetOptions(ArgStringList &CC1Args) const {
+  const Generic_GCC::GCCVersion &V = GCCInstallation.getVersion();
+  if (V >= Generic_GCC::GCCVersion::Parse("4.7.0"))
+    CC1Args.push_back("-fuse-init-array");
+}
+
 void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
                                       ArgStringList &CC1Args) const {
   const Driver &D = getDriver();
@@ -2252,7 +2235,7 @@ void Linux::AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
   // equivalent to '/usr/include/c++/X.Y' in almost all cases.
   StringRef LibDir = GCCInstallation.getParentLibPath();
   StringRef InstallDir = GCCInstallation.getInstallPath();
-  StringRef Version = GCCInstallation.getVersion();
+  StringRef Version = GCCInstallation.getVersion().Text;
   if (!addLibStdCXXIncludePaths(LibDir + "/../include/c++/" + Version,
                                 (GCCInstallation.getTriple().str() +
                                  GCCInstallation.getMultiarchSuffix()),

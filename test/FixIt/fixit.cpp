@@ -54,7 +54,7 @@ namespace rdar7853795 {
 }
 
 namespace rdar7796492 {
-  class A { int x, y; A(); };
+  struct A { int x, y; A(); };
 
   A::A()
     : x(1) y(2) { // expected-error{{missing ',' between base or member initializers}}
@@ -219,6 +219,7 @@ void Foo::SetBar(Bar bar) { bar_ = bar; } // expected-error {{must use 'enum' ta
 
 #define NULL __null
 char c = NULL; // expected-warning {{implicit conversion of NULL constant to 'char'}}
+double dbl = NULL; // expected-warning {{implicit conversion of NULL constant to 'double'}}
 
 namespace arrow_suggest {
 
@@ -242,3 +243,52 @@ void test() {
 }
 
 } // namespace arrow_suggest
+
+// Make sure fixing namespace-qualified identifiers functions properly with
+// namespace-aware typo correction/
+namespace redecl_typo {
+namespace Foo {
+  void BeEvil(); // expected-note {{'BeEvil' declared here}}
+}
+namespace Bar {
+  namespace Foo {
+    bool isGood(); // expected-note {{'Bar::Foo::isGood' declared here}}
+    void beEvil();
+  }
+}
+bool Foo::isGood() { // expected-error {{out-of-line definition of 'isGood' does not match any declaration in namespace 'redecl_typo::Foo'; did you mean 'Bar::Foo::isGood'?}}
+  return true;
+}
+void Foo::beEvil() {} // expected-error {{out-of-line definition of 'beEvil' does not match any declaration in namespace 'redecl_typo::Foo'; did you mean 'BeEvil'?}}
+}
+
+// Test behavior when a template-id is ended by a token which starts with '>'.
+namespace greatergreater {
+  template<typename T> struct S { S(); S(T); };
+  void f(S<int>=0); // expected-error {{a space is required between a right angle bracket and an equals sign (use '> =')}}
+
+  // FIXME: The fix-its here overlap so -fixit mode can't apply the second one.
+  //void f(S<S<int>>=S<int>());
+
+  struct Shr {
+    template<typename T> Shr(T);
+    template<typename T> void operator >>=(T);
+  };
+
+  template<template<typename>> struct TemplateTemplateParam; // expected-error {{requires 'class'}}
+
+  template<typename T> void t();
+  void g() {
+    void (*p)() = &t<int>;
+    (void)(&t<int>==p); // expected-error {{use '> ='}}
+    (void)(&t<int>>=p); // expected-error {{use '> >'}}
+    (void)(&t<S<int>>>=p); // expected-error {{use '> >'}}
+    (Shr)&t<S<int>>>>=p; // expected-error {{use '> >'}}
+
+    // FIXME: We correct this to '&t<int> > >= p;' not '&t<int> >>= p;'
+    //(Shr)&t<int>>>=p;
+
+    // FIXME: The fix-its here overlap.
+    //(void)(&t<S<int>>==p);
+  }
+}

@@ -15,6 +15,7 @@
 #ifndef LLVM_CLANG_SOURCEMANAGER_INTERNALS_H
 #define LLVM_CLANG_SOURCEMANAGER_INTERNALS_H
 
+#include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "llvm/ADT/StringMap.h"
 #include <map>
@@ -29,11 +30,11 @@ struct LineEntry {
   /// FileOffset - The offset in this file that the line entry occurs at.
   unsigned FileOffset;
 
-  /// LineNo - The presumed line number of this line entry: #line 4.
+  /// LineNo - The presumed line number of this line entry: \#line 4.
   unsigned LineNo;
 
   /// FilenameID - The ID of the filename identified by this line entry:
-  /// #line 4 "foo.c".  This is -1 if not specified.
+  /// \#line 4 "foo.c".  This is -1 if not specified.
   int FilenameID;
 
   /// Flags - Set the 0 if no flags, 1 if a system header,
@@ -41,7 +42,7 @@ struct LineEntry {
 
   /// IncludeOffset - This is the offset of the virtual include stack location,
   /// which is manipulated by GNU linemarker directives.  If this is 0 then
-  /// there is no virtual #includer.
+  /// there is no virtual \#includer.
   unsigned IncludeOffset;
 
   static LineEntry get(unsigned Offs, unsigned Line, int Filename,
@@ -72,19 +73,19 @@ inline bool operator<(unsigned Offset, const LineEntry &E) {
 }
 
 /// LineTableInfo - This class is used to hold and unique data used to
-/// represent #line information.
+/// represent \#line information.
 class LineTableInfo {
   /// FilenameIDs - This map is used to assign unique IDs to filenames in
-  /// #line directives.  This allows us to unique the filenames that
+  /// \#line directives.  This allows us to unique the filenames that
   /// frequently reoccur and reference them with indices.  FilenameIDs holds
   /// the mapping from string -> ID, and FilenamesByID holds the mapping of ID
   /// to string.
   llvm::StringMap<unsigned, llvm::BumpPtrAllocator> FilenameIDs;
   std::vector<llvm::StringMapEntry<unsigned>*> FilenamesByID;
 
-  /// LineEntries - This is a map from FileIDs to a list of line entries (sorted
-  /// by the offset they occur in the file.
-  std::map<int, std::vector<LineEntry> > LineEntries;
+  /// \brief Map from FileIDs to a list of line entries (sorted by the offset
+  /// at which they occur in the file).
+  std::map<FileID, std::vector<LineEntry> > LineEntries;
 public:
   LineTableInfo() {
   }
@@ -104,25 +105,25 @@ public:
   }
   unsigned getNumFilenames() const { return FilenamesByID.size(); }
 
-  void AddLineNote(int FID, unsigned Offset,
+  void AddLineNote(FileID FID, unsigned Offset,
                    unsigned LineNo, int FilenameID);
-  void AddLineNote(int FID, unsigned Offset,
+  void AddLineNote(FileID FID, unsigned Offset,
                    unsigned LineNo, int FilenameID,
                    unsigned EntryExit, SrcMgr::CharacteristicKind FileKind);
 
 
   /// FindNearestLineEntry - Find the line entry nearest to FID that is before
   /// it.  If there is no line entry before Offset in FID, return null.
-  const LineEntry *FindNearestLineEntry(int FID, unsigned Offset);
+  const LineEntry *FindNearestLineEntry(FileID FID, unsigned Offset);
 
   // Low-level access
-  typedef std::map<int, std::vector<LineEntry> >::iterator iterator;
+  typedef std::map<FileID, std::vector<LineEntry> >::iterator iterator;
   iterator begin() { return LineEntries.begin(); }
   iterator end() { return LineEntries.end(); }
 
   /// \brief Add a new line entry that has already been encoded into
   /// the internal representation of the line table.
-  void AddEntry(int FID, const std::vector<LineEntry> &Entries);
+  void AddEntry(FileID FID, const std::vector<LineEntry> &Entries);
 };
 
 } // end namespace clang

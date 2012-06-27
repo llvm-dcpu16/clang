@@ -473,17 +473,14 @@ template <> struct DenseMapInfo<ObjCSummaryKey> {
   }
 
   static unsigned getHashValue(const ObjCSummaryKey &V) {
-    return (DenseMapInfo<IdentifierInfo*>::getHashValue(V.getIdentifier())
-            & 0x88888888)
-        | (DenseMapInfo<Selector>::getHashValue(V.getSelector())
-            & 0x55555555);
+    typedef std::pair<IdentifierInfo*, Selector> PairTy;
+    return DenseMapInfo<PairTy>::getHashValue(PairTy(V.getIdentifier(),
+                                                     V.getSelector()));
   }
 
   static bool isEqual(const ObjCSummaryKey& LHS, const ObjCSummaryKey& RHS) {
-    return DenseMapInfo<IdentifierInfo*>::isEqual(LHS.getIdentifier(),
-                                                  RHS.getIdentifier()) &&
-           DenseMapInfo<Selector>::isEqual(LHS.getSelector(),
-                                           RHS.getSelector());
+    return LHS.getIdentifier() == RHS.getIdentifier() &&
+           LHS.getSelector() == RHS.getSelector();
   }
 
 };
@@ -1354,10 +1351,15 @@ RetainSummaryManager::getStandardMethodSummary(const ObjCMethodDecl *MD,
   // because the reference count is quite possibly handled by a delegate
   // method.
   if (S.isKeywordSelector()) {
-    const std::string &str = S.getAsString();
-    assert(!str.empty());
-    if (StrInStrNoCase(str, "delegate:") != StringRef::npos)
-      ReceiverEff = StopTracking;
+    for (unsigned i = 0, e = S.getNumArgs(); i != e; ++i) {
+      StringRef Slot = S.getNameForSlot(i);
+      if (Slot.substr(Slot.size() - 8).equals_lower("delegate")) {
+        if (ResultEff == ObjCInitRetE)
+          ResultEff = RetEffect::MakeNoRet();
+        else
+          ReceiverEff = StopTracking;
+      }
+    }
   }
 
   if (ScratchArgs.isEmpty() && ReceiverEff == DoNothing &&
@@ -1703,30 +1705,16 @@ namespace {
   };
 
   class Leak : public CFRefBug {
-    const bool isReturn;
-  protected:
-    Leak(StringRef name, bool isRet)
-    : CFRefBug(name), isReturn(isRet) {
+  public:
+    Leak(StringRef name)
+    : CFRefBug(name) {
       // Leaks should not be reported if they are post-dominated by a sink.
       setSuppressOnSink(true);
     }
-  public:
 
     const char *getDescription() const { return ""; }
 
     bool isLeak() const { return true; }
-  };
-
-  class LeakAtReturn : public Leak {
-  public:
-    LeakAtReturn(StringRef name)
-    : Leak(name, true) {}
-  };
-
-  class LeakWithinFunction : public Leak {
-  public:
-    LeakWithinFunction(StringRef name)
-    : Leak(name, false) {}
   };
 
   //===---------===//
@@ -1867,6 +1855,15 @@ static inline bool contains(const SmallVectorImpl<ArgEffect>& V,
   return false;
 }
 
+static bool isNumericLiteralExpression(const Expr *E) {
+  // FIXME: This set of cases was copied from SemaExprObjC.
+  return isa<IntegerLiteral>(E) || 
+         isa<CharacterLiteral>(E) ||
+         isa<FloatingLiteral>(E) ||
+         isa<ObjCBoolLiteralExpr>(E) ||
+         isa<CXXBoolLiteralExpr>(E);
+}
+
 static bool isPropertyAccess(const Stmt *S, ParentMap &PM) {
   unsigned maxDepth = 4;
   while (S && maxDepth) {
@@ -1915,6 +1912,24 @@ PathDiagnosticPiece *CFRefReportVisitor::VisitNode(const ExplodedNode *N,
     }
     else if (isa<ObjCDictionaryLiteral>(S)) {
       os << "NSDictionary literal is an object with a +0 retain count";
+    }
+    else if (const ObjCBoxedExpr *BL = dyn_cast<ObjCBoxedExpr>(S)) {
+      if (isNumericLiteralExpression(BL->getSubExpr()))
+        os << "NSNumber literal is an object with a +0 retain count";
+      else {
+        const ObjCInterfaceDecl *BoxClass = 0;
+        if (const ObjCMethodDecl *Method = BL->getBoxingMethod())
+          BoxClass = Method->getClassInterface();
+
+        // We should always be able to find the boxing class interface,
+        // but consider this future-proofing.
+        if (BoxClass)
+          os << *BoxClass << " b";
+        else
+          os << "B";
+
+        os << "oxed expression produces an object with a +0 retain count";
+      }
     }
     else {      
       if (const CallExpr *CE = dyn_cast<CallExpr>(S)) {
@@ -2324,6 +2339,7 @@ class RetainCountChecker
                     check::PostStmt<CXXConstructExpr>,
                     check::PostStmt<ObjCArrayLiteral>,
                     check::PostStmt<ObjCDictionaryLiteral>,
+                    check::PostStmt<ObjCBoxedExpr>,
                     check::PostObjCMessage,
                     check::PreStmt<ReturnStmt>,
                     check::RegionChanges,
@@ -2395,20 +2411,17 @@ public:
                                      bool GCEnabled) const {
     if (GCEnabled) {
       if (!leakWithinFunctionGC)
-        leakWithinFunctionGC.reset(new LeakWithinFunction("Leak of object when "
-                                                          "using garbage "
-                                                          "collection"));
+        leakWithinFunctionGC.reset(new Leak("Leak of object when using "
+                                             "garbage collection"));
       return leakWithinFunctionGC.get();
     } else {
       if (!leakWithinFunction) {
         if (LOpts.getGC() == LangOptions::HybridGC) {
-          leakWithinFunction.reset(new LeakWithinFunction("Leak of object when "
-                                                          "not using garbage "
-                                                          "collection (GC) in "
-                                                          "dual GC/non-GC "
-                                                          "code"));
+          leakWithinFunction.reset(new Leak("Leak of object when not using "
+                                            "garbage collection (GC) in "
+                                            "dual GC/non-GC code"));
         } else {
-          leakWithinFunction.reset(new LeakWithinFunction("Leak"));
+          leakWithinFunction.reset(new Leak("Leak"));
         }
       }
       return leakWithinFunction.get();
@@ -2418,17 +2431,17 @@ public:
   CFRefBug *getLeakAtReturnBug(const LangOptions &LOpts, bool GCEnabled) const {
     if (GCEnabled) {
       if (!leakAtReturnGC)
-        leakAtReturnGC.reset(new LeakAtReturn("Leak of returned object when "
-                                              "using garbage collection"));
+        leakAtReturnGC.reset(new Leak("Leak of returned object when using "
+                                      "garbage collection"));
       return leakAtReturnGC.get();
     } else {
       if (!leakAtReturn) {
         if (LOpts.getGC() == LangOptions::HybridGC) {
-          leakAtReturn.reset(new LeakAtReturn("Leak of returned object when "
-                                              "not using garbage collection "
-                                              "(GC) in dual GC/non-GC code"));
+          leakAtReturn.reset(new Leak("Leak of returned object when not using "
+                                      "garbage collection (GC) in dual "
+                                      "GC/non-GC code"));
         } else {
-          leakAtReturn.reset(new LeakAtReturn("Leak of returned object"));
+          leakAtReturn.reset(new Leak("Leak of returned object"));
         }
       }
       return leakAtReturn.get();
@@ -2470,6 +2483,8 @@ public:
   void checkPostStmt(const CXXConstructExpr *CE, CheckerContext &C) const;
   void checkPostStmt(const ObjCArrayLiteral *AL, CheckerContext &C) const;
   void checkPostStmt(const ObjCDictionaryLiteral *DL, CheckerContext &C) const;
+  void checkPostStmt(const ObjCBoxedExpr *BE, CheckerContext &C) const;
+
   void checkPostObjCMessage(const ObjCMessage &Msg, CheckerContext &C) const;
                       
   void checkSummary(const RetainSummary &Summ, const CallOrObjCMessage &Call,
@@ -2719,6 +2734,21 @@ void RetainCountChecker::checkPostStmt(const ObjCDictionaryLiteral *DL,
                                        CheckerContext &C) const {
   // Apply the 'MayEscape' to all keys and values.
   processObjCLiterals(C, DL);
+}
+
+void RetainCountChecker::checkPostStmt(const ObjCBoxedExpr *Ex,
+                                       CheckerContext &C) const {
+  const ExplodedNode *Pred = C.getPredecessor();  
+  const LocationContext *LCtx = Pred->getLocationContext();
+  ProgramStateRef State = Pred->getState();
+
+  if (SymbolRef Sym = State->getSVal(Ex, LCtx).getAsSymbol()) {
+    QualType ResultTy = Ex->getType();
+    State = State->set<RefBindings>(Sym, RefVal::makeNotOwned(RetEffect::ObjC,
+                                                              ResultTy));
+  }
+
+  C.addTransition(State);
 }
 
 void RetainCountChecker::checkPostObjCMessage(const ObjCMessage &Msg, 

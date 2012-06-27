@@ -85,7 +85,7 @@ public:
         if (PrevAtProps->find(RawLoc) != PrevAtProps->end())
           continue;
       PropsTy &props = AtProps[RawLoc];
-      props.push_back(&*propI);
+      props.push_back(*propI);
     }
   }
 
@@ -102,7 +102,7 @@ public:
     for (prop_impl_iterator
            I = prop_impl_iterator(D->decls_begin()),
            E = prop_impl_iterator(D->decls_end()); I != E; ++I) {
-      ObjCPropertyImplDecl *implD = &*I;
+      ObjCPropertyImplDecl *implD = *I;
       if (implD->getPropertyImplementation() != ObjCPropertyImplDecl::Synthesize)
         continue;
       ObjCPropertyDecl *propD = implD->getPropertyDecl();
@@ -309,17 +309,8 @@ private:
         if (RE->getDecl() != Ivar)
           return true;
 
-      if (ObjCMessageExpr *
-            ME = dyn_cast<ObjCMessageExpr>(E->getRHS()->IgnoreParenCasts()))
-        if (ME->getMethodFamily() == OMF_retain)
+        if (isPlusOneAssign(E))
           return false;
-
-      ImplicitCastExpr *implCE = dyn_cast<ImplicitCastExpr>(E->getRHS());
-      while (implCE && implCE->getCastKind() ==  CK_BitCast)
-        implCE = dyn_cast<ImplicitCastExpr>(implCE->getSubExpr());
-
-      if (implCE && implCE->getCastKind() == CK_ARCConsumeObject)
-        return false;
       }
 
       return true;

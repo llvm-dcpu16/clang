@@ -7,124 +7,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/AST/ASTConsumer.h"
-#include "clang/AST/RecursiveASTVisitor.h"
-#include "clang/Frontend/FrontendAction.h"
-#include "clang/Frontend/CompilerInstance.h"
-#include "clang/Tooling/Tooling.h"
-#include "gtest/gtest.h"
+#include "TestVisitor.h"
 
 namespace clang {
-
-/// \brief Base class for sipmle RecursiveASTVisitor based tests.
-///
-/// This is a drop-in replacement for RecursiveASTVisitor itself, with the
-/// additional capability of running it over a snippet of code.
-///
-/// Visits template instantiations by default.
-///
-/// FIXME: Put into a common location.
-template <typename T>
-class TestVisitor : public clang::RecursiveASTVisitor<T> {
-public:
-  /// \brief Runs the current AST visitor over the given code.
-  bool runOver(StringRef Code) {
-    return tooling::runToolOnCode(new TestAction(this), Code);
-  }
-
-  bool shouldVisitTemplateInstantiations() const {
-    return true;
-  }
-
-protected:
-  clang::ASTContext *Context;
-
-private:
-  class FindConsumer : public clang::ASTConsumer {
-  public:
-    FindConsumer(TestVisitor *Visitor) : Visitor(Visitor) {}
-
-    virtual void HandleTranslationUnit(clang::ASTContext &Context) {
-      Visitor->TraverseDecl(Context.getTranslationUnitDecl());
-    }
-
-  private:
-    TestVisitor *Visitor;
-  };
-
-  class TestAction : public clang::ASTFrontendAction {
-  public:
-    TestAction(TestVisitor *Visitor) : Visitor(Visitor) {}
-
-    virtual clang::ASTConsumer* CreateASTConsumer(
-        clang::CompilerInstance& compiler, llvm::StringRef dummy) {
-      Visitor->Context = &compiler.getASTContext();
-      /// TestConsumer will be deleted by the framework calling us.
-      return new FindConsumer(Visitor);
-    }
-
-  private:
-    TestVisitor *Visitor;
-  };
-};
-
-/// \brief A RecursiveASTVisitor for testing the RecursiveASTVisitor itself.
-///
-/// Allows simple creation of test visitors running matches on only a small
-/// subset of the Visit* methods.
-template <typename T>
-class ExpectedLocationVisitor : public TestVisitor<T> {
-public:
-  ExpectedLocationVisitor()
-    : ExpectedLine(0), ExpectedColumn(0), Found(false) {}
-
-  ~ExpectedLocationVisitor() {
-    EXPECT_TRUE(Found)
-      << "Expected \"" << ExpectedMatch << "\" at " << ExpectedLine
-      << ":" << ExpectedColumn << PartialMatches;
-  }
-
-  /// \brief Expect 'Match' to occur at the given 'Line' and 'Column'.
-  void ExpectMatch(Twine Match, unsigned Line, unsigned Column) {
-    ExpectedMatch = Match.str();
-    ExpectedLine = Line;
-    ExpectedColumn = Column;
-  }
-
-protected:
-  /// \brief Convenience method to simplify writing test visitors.
-  ///
-  /// Sets 'Found' to true if 'Name' and 'Location' match the expected
-  /// values. If only a partial match is found, record the information
-  /// to produce nice error output when a test fails.
-  ///
-  /// Implementations are required to call this with appropriate values
-  /// for 'Name' during visitation.
-  void Match(StringRef Name, SourceLocation Location) {
-    FullSourceLoc FullLocation = this->Context->getFullLoc(Location);
-    if (Name == ExpectedMatch &&
-        FullLocation.isValid() &&
-        FullLocation.getSpellingLineNumber() == ExpectedLine &&
-        FullLocation.getSpellingColumnNumber() == ExpectedColumn) {
-      EXPECT_TRUE(!Found);
-      Found = true;
-    } else if (Name == ExpectedMatch ||
-               (FullLocation.isValid() &&
-                FullLocation.getSpellingLineNumber() == ExpectedLine &&
-                FullLocation.getSpellingColumnNumber() == ExpectedColumn)) {
-      // If we did not match, record information about partial matches.
-      llvm::raw_string_ostream Stream(PartialMatches);
-      Stream << ", partial match: \"" << Name << "\" at ";
-      Location.print(Stream, this->Context->getSourceManager());
-    }
-  }
-
-  std::string ExpectedMatch;
-  unsigned ExpectedLine;
-  unsigned ExpectedColumn;
-  std::string PartialMatches;
-  bool Found;
-};
 
 class TypeLocVisitor : public ExpectedLocationVisitor<TypeLocVisitor> {
 public:
@@ -140,6 +25,14 @@ public:
     Match(Reference->getNameInfo().getAsString(), Reference->getLocation());
     return true;
   }
+};
+
+class VarDeclVisitor : public ExpectedLocationVisitor<VarDeclVisitor> {
+public:
+ bool VisitVarDecl(VarDecl *Variable) {
+   Match(Variable->getNameAsString(), Variable->getLocStart());
+   return true;
+ }
 };
 
 class CXXMemberCallVisitor
@@ -185,6 +78,33 @@ public:
   }
 };
 
+class TemplateArgumentLocTraverser
+  : public ExpectedLocationVisitor<TemplateArgumentLocTraverser> {
+public:
+  bool TraverseTemplateArgumentLoc(const TemplateArgumentLoc &ArgLoc) {
+    std::string ArgStr;
+    llvm::raw_string_ostream Stream(ArgStr);
+    const TemplateArgument &Arg = ArgLoc.getArgument();
+
+    Arg.print(Context->getPrintingPolicy(), Stream);
+    Match(Stream.str(), ArgLoc.getLocation());
+    return ExpectedLocationVisitor<TemplateArgumentLocTraverser>::
+      TraverseTemplateArgumentLoc(ArgLoc);
+  }
+};
+
+class CXXBoolLiteralExprVisitor 
+  : public ExpectedLocationVisitor<CXXBoolLiteralExprVisitor> {
+public:
+  bool VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *BE) {
+    if (BE->getValue())
+      Match("true", BE->getLocation());
+    else
+      Match("false", BE->getLocation());
+    return true;
+  }
+};
+
 TEST(RecursiveASTVisitor, VisitsBaseClassDeclarations) {
   TypeLocVisitor Visitor;
   Visitor.ExpectMatch("class X", 1, 30);
@@ -221,6 +141,23 @@ TEST(RecursiveASTVisitor, VisitsBaseClassTemplateArguments) {
   Visitor.ExpectMatch("x", 2, 3);
   EXPECT_TRUE(Visitor.runOver(
     "void x(); template <void (*T)()> class X {};\nX<x> y;"));
+}
+
+TEST(RecursiveASTVisitor, VisitsCXXForRangeStmtRange) {
+  DeclRefExprVisitor Visitor;
+  Visitor.ExpectMatch("x", 2, 25);
+  Visitor.ExpectMatch("x", 2, 30);
+  EXPECT_TRUE(Visitor.runOver(
+    "int x[5];\n"
+    "void f() { for (int i : x) { x[0] = 1; } }"));
+}
+
+TEST(RecursiveASTVisitor, VisitsCXXForRangeStmtLoopVariable) {
+  VarDeclVisitor Visitor;
+  Visitor.ExpectMatch("i", 2, 17);
+  EXPECT_TRUE(Visitor.runOver(
+    "int x[5];\n"
+    "void f() { for (int i : x) {} }"));
 }
 
 TEST(RecursiveASTVisitor, VisitsCallExpr) {
@@ -316,7 +253,7 @@ TEST(RecursiveASTVisitor, VisitsExplicitTemplateSpecialization) {
 
 TEST(RecursiveASTVisitor, VisitsPartialTemplateSpecialization) {
   // From cfe-commits/Week-of-Mon-20100830/033998.html
-  // Contrary to the approach sugggested in that email, we visit all
+  // Contrary to the approach suggested in that email, we visit all
   // specializations when we visit the primary template.  Visiting them when we
   // visit the associated specialization is problematic for specializations of
   // template members of class templates.
@@ -392,6 +329,60 @@ TEST(RecursiveASTVisitor, VisitsParensDuringDataRecursion) {
   ParenExprVisitor Visitor;
   Visitor.ExpectMatch("", 1, 9);
   EXPECT_TRUE(Visitor.runOver("int k = (4) + 9;\n"));
+}
+
+TEST(RecursiveASTVisitor, VisitsClassTemplateNonTypeParmDefaultArgument) {
+  CXXBoolLiteralExprVisitor Visitor;
+  Visitor.ExpectMatch("true", 2, 19);
+  EXPECT_TRUE(Visitor.runOver(
+    "template<bool B> class X;\n"
+    "template<bool B = true> class Y;\n"
+    "template<bool B> class Y {};\n"));
+}
+
+TEST(RecursiveASTVisitor, VisitsClassTemplateTypeParmDefaultArgument) {
+  TypeLocVisitor Visitor;
+  Visitor.ExpectMatch("class X", 2, 23);
+  EXPECT_TRUE(Visitor.runOver(
+    "class X;\n"
+    "template<typename T = X> class Y;\n"
+    "template<typename T> class Y {};\n"));
+}
+
+TEST(RecursiveASTVisitor, VisitsClassTemplateTemplateParmDefaultArgument) {
+  TemplateArgumentLocTraverser Visitor;
+  Visitor.ExpectMatch("X", 2, 40);
+  EXPECT_TRUE(Visitor.runOver(
+    "template<typename T> class X;\n"
+    "template<template <typename> class T = X> class Y;\n"
+    "template<template <typename> class T> class Y {};\n"));
+}
+
+// A visitor that visits implicit declarations and matches constructors.
+class ImplicitCtorVisitor
+    : public ExpectedLocationVisitor<ImplicitCtorVisitor> {
+public:
+  bool shouldVisitImplicitCode() const { return true; }
+
+  bool VisitCXXConstructorDecl(CXXConstructorDecl* Ctor) {
+    if (Ctor->isImplicit()) {  // Was not written in source code
+      if (const CXXRecordDecl* Class = Ctor->getParent()) {
+        Match(Class->getName(), Ctor->getLocation());
+      }
+    }
+    return true;
+  }
+};
+
+TEST(RecursiveASTVisitor, VisitsImplicitCopyConstructors) {
+  ImplicitCtorVisitor Visitor;
+  Visitor.ExpectMatch("Simple", 2, 8);
+  // Note: Clang lazily instantiates implicit declarations, so we need
+  // to use them in order to force them to appear in the AST.
+  EXPECT_TRUE(Visitor.runOver(
+      "struct WithCtor { WithCtor(); }; \n"
+      "struct Simple { Simple(); WithCtor w; }; \n"
+      "int main() { Simple s; Simple t(s); }\n"));
 }
 
 } // end namespace clang

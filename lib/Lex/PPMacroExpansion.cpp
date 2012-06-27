@@ -487,10 +487,12 @@ MacroArgs *Preprocessor::ReadFunctionLikeMacroArgs(Token &MacroName,
     } else if (MI->isVariadic() &&
                (NumActuals+1 == MinArgsExpected ||  // A(x, ...) -> A(X)
                 (NumActuals == 0 && MinArgsExpected == 2))) {// A(x,...) -> A()
-      // Varargs where the named vararg parameter is missing: ok as extension.
-      // #define A(x, ...)
-      // A("blah")
+      // Varargs where the named vararg parameter is missing: OK as extension.
+      //   #define A(x, ...)
+      //   A("blah")
       Diag(Tok, diag::ext_missing_varargs_arg);
+      Diag(MI->getDefinitionLoc(), diag::note_macro_here)
+        << MacroName.getIdentifierInfo();
 
       // Remember this occurred, allowing us to elide the comma when used for
       // cases like:
@@ -643,13 +645,13 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("objc_fixed_enum", LangOpts.ObjC2)
            .Case("objc_instancetype", LangOpts.ObjC2)
            .Case("objc_modules", LangOpts.ObjC2 && LangOpts.Modules)
-           .Case("objc_nonfragile_abi", LangOpts.ObjCNonFragileABI)
-           .Case("objc_weak_class", LangOpts.ObjCNonFragileABI)
+           .Case("objc_nonfragile_abi", LangOpts.ObjCRuntime.isNonFragile())
+           .Case("objc_weak_class", LangOpts.ObjCRuntime.hasWeakClassImport())
            .Case("ownership_holds", true)
            .Case("ownership_returns", true)
            .Case("ownership_takes", true)
            .Case("objc_bool", true)
-           .Case("objc_subscripting", LangOpts.ObjCNonFragileABI)
+           .Case("objc_subscripting", LangOpts.ObjCRuntime.isNonFragile())
            .Case("objc_array_literals", LangOpts.ObjC2)
            .Case("objc_dictionary_literals", LangOpts.ObjC2)
            .Case("objc_boxed_expressions", LangOpts.ObjC2)
@@ -791,6 +793,7 @@ static bool HasAttribute(const IdentifierInfo *II) {
   if (Name.startswith("__") && Name.endswith("__") && Name.size() >= 4)
     Name = Name.substr(2, Name.size() - 4);
 
+  // FIXME: Do we need to handle namespaces here?
   return llvm::StringSwitch<bool>(Name)
 #include "clang/Lex/AttrSpellings.inc"
         .Default(false);

@@ -121,6 +121,12 @@ static void addObjCARCOptPass(const PassManagerBuilder &Builder, PassManagerBase
     PM.add(createObjCARCOptPass());
 }
 
+static unsigned BoundsChecking;
+static void addBoundsCheckingPass(const PassManagerBuilder &Builder,
+                                    PassManagerBase &PM) {
+  PM.add(createBoundsCheckingPass(BoundsChecking));
+}
+
 static void addAddressSanitizerPass(const PassManagerBuilder &Builder,
                                     PassManagerBase &PM) {
   PM.add(createAddressSanitizerPass());
@@ -158,6 +164,14 @@ void EmitAssemblyHelper::CreatePasses() {
                            addObjCARCAPElimPass);
     PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
                            addObjCARCOptPass);
+  }
+
+  if (CodeGenOpts.BoundsChecking > 0) {
+    BoundsChecking = CodeGenOpts.BoundsChecking;
+    PMBuilder.addExtension(PassManagerBuilder::EP_ScalarOptimizerLate,
+                           addBoundsCheckingPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addBoundsCheckingPass);
   }
 
   if (LangOpts.AddressSanitizer) {
@@ -323,6 +337,9 @@ bool EmitAssemblyHelper::AddEmitPasses(BackendAction Action,
     Options.NoFramePointerElim = true;
     Options.NoFramePointerElimNonLeaf = true;
   }
+
+  if (CodeGenOpts.UseInitArray)
+    Options.UseInitArray = true;
 
   // Set float ABI type.
   if (CodeGenOpts.FloatABI == "soft" || CodeGenOpts.FloatABI == "softfp")

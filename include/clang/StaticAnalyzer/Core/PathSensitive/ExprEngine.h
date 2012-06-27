@@ -285,6 +285,10 @@ public:
 
   /// VisitAsmStmt - Transfer function logic for inline asm.
   void VisitAsmStmt(const AsmStmt *A, ExplodedNode *Pred, ExplodedNodeSet &Dst);
+
+  /// VisitMSAsmStmt - Transfer function logic for MS inline asm.
+  void VisitMSAsmStmt(const MSAsmStmt *A, ExplodedNode *Pred,
+                      ExplodedNodeSet &Dst);
   
   /// VisitBlockExpr - Transfer function logic for BlockExprs.
   void VisitBlockExpr(const BlockExpr *BE, ExplodedNode *Pred, 
@@ -393,13 +397,6 @@ public:
   void CreateCXXTemporaryObject(const MaterializeTemporaryExpr *ME,
                                 ExplodedNode *Pred, 
                                 ExplodedNodeSet &Dst);
-
-  /// Synthesize CXXThisRegion.
-  const CXXThisRegion *getCXXThisRegion(const CXXRecordDecl *RD,
-                                        const StackFrameContext *SFC);
-
-  const CXXThisRegion *getCXXThisRegion(const CXXMethodDecl *decl,
-                                        const StackFrameContext *frameCtx);
   
   /// evalEagerlyAssume - Given the nodes in 'Src', eagerly assume symbolic
   ///  expressions of the form 'x != 0' and generate new nodes (stored in Dst)
@@ -494,7 +491,7 @@ private:
                     ProgramStateRef St, SVal location,
                     const ProgramPointTag *tag, bool isLoad);
 
-  bool shouldInlineDecl(const FunctionDecl *FD, ExplodedNode *Pred);
+  bool shouldInlineDecl(const Decl *D, ExplodedNode *Pred);
   bool InlineCall(ExplodedNodeSet &Dst, const CallExpr *CE, ExplodedNode *Pred);
 
   bool replayWithoutInlining(ExplodedNode *P, const LocationContext *CalleeLC);

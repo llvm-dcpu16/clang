@@ -11,11 +11,13 @@
 #define LLVM_CLANG_AST_NSAPI_H
 
 #include "clang/Basic/IdentifierTable.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/Optional.h"
 
 namespace clang {
   class ASTContext;
   class QualType;
+  class Expr;
 
 // \brief Provides info and caches identifiers/selectors for NSFoundation API.
 class NSAPI {
@@ -37,14 +39,32 @@ public:
 
   enum NSStringMethodKind {
     NSStr_stringWithString,
+    NSStr_stringWithUTF8String,
+    NSStr_stringWithCStringEncoding,
+    NSStr_stringWithCString,
     NSStr_initWithString
   };
-  static const unsigned NumNSStringMethods = 2;
+  static const unsigned NumNSStringMethods = 5;
 
   IdentifierInfo *getNSClassId(NSClassIdKindKind K) const;
 
   /// \brief The Objective-C NSString selectors.
   Selector getNSStringSelector(NSStringMethodKind MK) const;
+
+  /// \brief Return NSStringMethodKind if \param Sel is such a selector.
+  llvm::Optional<NSStringMethodKind> getNSStringMethodKind(Selector Sel) const;
+
+  /// \brief Returns true if the expression \param E is a reference of
+  /// "NSUTF8StringEncoding" enum constant.
+  bool isNSUTF8StringEncodingConstant(const Expr *E) const {
+    return isObjCEnumerator(E, "NSUTF8StringEncoding", NSUTF8StringEncodingId);
+  }
+
+  /// \brief Returns true if the expression \param E is a reference of
+  /// "NSASCIIStringEncoding" enum constant.
+  bool isNSASCIIStringEncodingConstant(const Expr *E) const {
+    return isObjCEnumerator(E, "NSASCIIStringEncoding",NSASCIIStringEncodingId);
+  }
 
   /// \brief Enumerates the NSArray methods used to generate literals.
   enum NSArrayMethodKind {
@@ -87,6 +107,35 @@ public:
   /// \brief Return NSDictionaryMethodKind if \arg Sel is such a selector.
   llvm::Optional<NSDictionaryMethodKind>
       getNSDictionaryMethodKind(Selector Sel);
+
+  /// \brief Returns selector for "objectForKeyedSubscript:".
+  Selector getObjectForKeyedSubscriptSelector() const {
+    return getOrInitSelector(StringRef("objectForKeyedSubscript"),
+                             objectForKeyedSubscriptSel);
+  }
+
+  /// \brief Returns selector for "objectAtIndexedSubscript:".
+  Selector getObjectAtIndexedSubscriptSelector() const {
+    return getOrInitSelector(StringRef("objectAtIndexedSubscript"),
+                             objectAtIndexedSubscriptSel);
+  }
+
+  /// \brief Returns selector for "setObject:forKeyedSubscript".
+  Selector getSetObjectForKeyedSubscriptSelector() const {
+    StringRef Ids[] = { "setObject", "forKeyedSubscript" };
+    return getOrInitSelector(Ids, setObjectForKeyedSubscriptSel);
+  }
+
+  /// \brief Returns selector for "setObject:atIndexedSubscript".
+  Selector getSetObjectAtIndexedSubscriptSelector() const {
+    StringRef Ids[] = { "setObject", "atIndexedSubscript" };
+    return getOrInitSelector(Ids, setObjectAtIndexedSubscriptSel);
+  }
+
+  /// \brief Returns selector for "isEqual:".
+  Selector getIsEqualSelector() const {
+    return getOrInitSelector(StringRef("isEqual"), isEqualSel);
+  }
 
   /// \brief Enumerates the NSNumber methods used to generate literals.
   enum NSNumberLiteralMethodKind {
@@ -138,6 +187,9 @@ public:
 
 private:
   bool isObjCTypedef(QualType T, StringRef name, IdentifierInfo *&II) const;
+  bool isObjCEnumerator(const Expr *E,
+                        StringRef name, IdentifierInfo *&II) const;
+  Selector getOrInitSelector(ArrayRef<StringRef> Ids, Selector &Sel) const;
 
   ASTContext &Ctx;
 
@@ -155,7 +207,12 @@ private:
   mutable Selector NSNumberClassSelectors[NumNSNumberLiteralMethods];
   mutable Selector NSNumberInstanceSelectors[NumNSNumberLiteralMethods];
 
+  mutable Selector objectForKeyedSubscriptSel, objectAtIndexedSubscriptSel,
+                   setObjectForKeyedSubscriptSel,setObjectAtIndexedSubscriptSel,
+                   isEqualSel;
+
   mutable IdentifierInfo *BOOLId, *NSIntegerId, *NSUIntegerId;
+  mutable IdentifierInfo *NSASCIIStringEncodingId, *NSUTF8StringEncodingId;
 };
 
 }  // end namespace clang

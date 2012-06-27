@@ -324,6 +324,7 @@ namespace {
     Stmt *RewriteObjCDictionaryLiteralExpr(ObjCDictionaryLiteral *Exp);
     Stmt *RewriteObjCProtocolExpr(ObjCProtocolExpr *Exp);
     Stmt *RewriteObjCTryStmt(ObjCAtTryStmt *S);
+    Stmt *RewriteObjCAutoreleasePoolStmt(ObjCAutoreleasePoolStmt  *S);
     Stmt *RewriteObjCSynchronizedStmt(ObjCAtSynchronizedStmt *S);
     Stmt *RewriteObjCThrowStmt(ObjCAtThrowStmt *S);
     Stmt *RewriteObjCForCollectionStmt(ObjCForCollectionStmt *S,
@@ -360,7 +361,7 @@ namespace {
     
     virtual void Initialize(ASTContext &context);
     
-    // Misc. AST transformation routines. Somtimes they end up calling
+    // Misc. AST transformation routines. Sometimes they end up calling
     // rewriting routines on the new ASTs.
     CallExpr *SynthesizeCallToFunctionDecl(FunctionDecl *FD,
                                            Expr **args, unsigned nargs,
@@ -822,7 +823,7 @@ RewriteModernObjC::getIvarAccessString(ObjCIvarDecl *D) {
                                         &Context->Idents.get(D->getNameAsString()),
                                         IvarT, 0,
                                         /*BitWidth=*/0, /*Mutable=*/true,
-                                        /*HasInit=*/false);
+                                        ICIS_NoInit);
       MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
                                                 FD->getType(), VK_LValue,
                                                 OK_Ordinary);
@@ -1076,7 +1077,7 @@ void RewriteModernObjC::RewriteCategoryDecl(ObjCCategoryDecl *CatDecl) {
   
   for (ObjCCategoryDecl::prop_iterator I = CatDecl->prop_begin(),
        E = CatDecl->prop_end(); I != E; ++I)
-    RewriteProperty(&*I);
+    RewriteProperty(*I);
   
   for (ObjCCategoryDecl::instmeth_iterator
          I = CatDecl->instmeth_begin(), E = CatDecl->instmeth_end();
@@ -1110,7 +1111,7 @@ void RewriteModernObjC::RewriteProtocolDecl(ObjCProtocolDecl *PDecl) {
 
   for (ObjCInterfaceDecl::prop_iterator I = PDecl->prop_begin(),
        E = PDecl->prop_end(); I != E; ++I)
-    RewriteProperty(&*I);
+    RewriteProperty(*I);
   
   // Lastly, comment out the @end.
   SourceLocation LocEnd = PDecl->getAtEndRange().getBegin();
@@ -1342,7 +1343,7 @@ void RewriteModernObjC::RewriteImplementationDecl(Decl *OID) {
        I = IMD ? IMD->propimpl_begin() : CID->propimpl_begin(),
        E = IMD ? IMD->propimpl_end() : CID->propimpl_end();
        I != E; ++I) {
-    RewritePropertyImplDecl(&*I, IMD, CID);
+    RewritePropertyImplDecl(*I, IMD, CID);
   }
 
   InsertText(IMD ? IMD->getLocEnd() : CID->getLocEnd(), "// ");
@@ -1370,7 +1371,7 @@ void RewriteModernObjC::RewriteInterfaceDecl(ObjCInterfaceDecl *ClassDecl) {
   
     for (ObjCInterfaceDecl::prop_iterator I = ClassDecl->prop_begin(),
          E = ClassDecl->prop_end(); I != E; ++I)
-      RewriteProperty(&*I);
+      RewriteProperty(*I);
     for (ObjCInterfaceDecl::instmeth_iterator
          I = ClassDecl->instmeth_begin(), E = ClassDecl->instmeth_end();
          I != E; ++I)
@@ -1879,6 +1880,15 @@ void RewriteModernObjC::WarnAboutReturnGotoStmts(Stmt *S)
                  TryFinallyContainsReturnDiag);
   }
   return;
+}
+
+Stmt *RewriteModernObjC::RewriteObjCAutoreleasePoolStmt(ObjCAutoreleasePoolStmt  *S) {
+  SourceLocation startLoc = S->getAtLoc();
+  ReplaceText(startLoc, strlen("@autoreleasepool"), "/* @autoreleasepool */");
+  ReplaceText(S->getSubStmt()->getLocStart(), 1, 
+              "{ __AtAutoreleasePool __autoreleasepool; ");
+  
+  return 0;
 }
 
 Stmt *RewriteModernObjC::RewriteObjCTryStmt(ObjCAtTryStmt *S) {
@@ -2710,7 +2720,7 @@ Stmt *RewriteModernObjC::RewriteObjCArrayLiteralExpr(ObjCArrayLiteral *Exp) {
                                     &Context->Idents.get("arr"),
                                     Context->getPointerType(Context->VoidPtrTy), 0,
                                     /*BitWidth=*/0, /*Mutable=*/true,
-                                    /*HasInit=*/false);
+                                    ICIS_NoInit);
   MemberExpr *ArrayLiteralME = 
     new (Context) MemberExpr(NSArrayCallExpr, false, ARRFD, 
                              SourceLocation(),
@@ -2857,7 +2867,7 @@ Stmt *RewriteModernObjC::RewriteObjCDictionaryLiteralExpr(ObjCDictionaryLiteral 
                                        &Context->Idents.get("arr"),
                                        Context->getPointerType(Context->VoidPtrTy), 0,
                                        /*BitWidth=*/0, /*Mutable=*/true,
-                                       /*HasInit=*/false);
+                                       ICIS_NoInit);
   MemberExpr *DictLiteralValueME = 
     new (Context) MemberExpr(NSValueCallExpr, false, ARRFD, 
                              SourceLocation(),
@@ -3004,7 +3014,7 @@ QualType RewriteModernObjC::getSuperStructType() {
                                                  FieldTypes[i], 0,
                                                  /*BitWidth=*/0,
                                                  /*Mutable=*/false,
-                                                 /*HasInit=*/false));
+                                                 ICIS_NoInit));
     }
 
     SuperStructDecl->completeDefinition();
@@ -3037,7 +3047,7 @@ QualType RewriteModernObjC::getConstantStringStructType() {
                                                     FieldTypes[i], 0,
                                                     /*BitWidth=*/0,
                                                     /*Mutable=*/true,
-                                                    /*HasInit=*/false));
+                                                    ICIS_NoInit));
     }
 
     ConstantStringDecl->completeDefinition();
@@ -3626,7 +3636,7 @@ bool RewriteModernObjC::RewriteObjCFieldDeclType(QualType &Type,
       Result += " {\n";
       for (RecordDecl::field_iterator i = RD->field_begin(), 
            e = RD->field_end(); i != e; ++i) {
-        FieldDecl *FD = &*i;
+        FieldDecl *FD = *i;
         RewriteObjCFieldDecl(FD, Result);
       }
       Result += "\t} "; 
@@ -4481,7 +4491,7 @@ Stmt *RewriteModernObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp
                                     &Context->Idents.get("FuncPtr"),
                                     Context->VoidPtrTy, 0,
                                     /*BitWidth=*/0, /*Mutable=*/true,
-                                    /*HasInit=*/false);
+                                    ICIS_NoInit);
   MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
                                             FD->getType(), VK_LValue,
                                             OK_Ordinary);
@@ -4530,7 +4540,7 @@ Stmt *RewriteModernObjC::RewriteBlockDeclRefExpr(DeclRefExpr *DeclRefExp) {
                                     &Context->Idents.get("__forwarding"), 
                                     Context->VoidPtrTy, 0,
                                     /*BitWidth=*/0, /*Mutable=*/true,
-                                    /*HasInit=*/false);
+                                    ICIS_NoInit);
   MemberExpr *ME = new (Context) MemberExpr(DeclRefExp, isArrow,
                                             FD, SourceLocation(),
                                             FD->getType(), VK_LValue,
@@ -4541,7 +4551,7 @@ Stmt *RewriteModernObjC::RewriteBlockDeclRefExpr(DeclRefExpr *DeclRefExp) {
                          &Context->Idents.get(Name), 
                          Context->VoidPtrTy, 0,
                          /*BitWidth=*/0, /*Mutable=*/true,
-                         /*HasInit=*/false);
+                         ICIS_NoInit);
   ME = new (Context) MemberExpr(ME, true, FD, SourceLocation(),
                                 DeclRefExp->getType(), VK_LValue, OK_Ordinary);
   
@@ -5408,6 +5418,11 @@ Stmt *RewriteModernObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
     return RewriteMessageExpr(MessExpr);
   }
 
+  if (ObjCAutoreleasePoolStmt *StmtAutoRelease = 
+        dyn_cast<ObjCAutoreleasePoolStmt>(S)) {
+    return RewriteObjCAutoreleasePoolStmt(StmtAutoRelease);
+  }
+  
   if (ObjCAtTryStmt *StmtTry = dyn_cast<ObjCAtTryStmt>(S))
     return RewriteObjCTryStmt(StmtTry);
 
@@ -5534,7 +5549,7 @@ Stmt *RewriteModernObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
 void RewriteModernObjC::RewriteRecordBody(RecordDecl *RD) {
   for (RecordDecl::field_iterator i = RD->field_begin(), 
                                   e = RD->field_end(); i != e; ++i) {
-    FieldDecl *FD = &*i;
+    FieldDecl *FD = *i;
     if (isTopLevelBlockPointerType(FD->getType()))
       RewriteBlockPointerDecl(FD);
     if (FD->getType()->isObjCQualifiedIdType() ||
@@ -5885,6 +5900,15 @@ void RewriteModernObjC::Initialize(ASTContext &context) {
   Preamble += "  ~__NSContainer_literal() {\n";
   Preamble += "\tdelete[] arr;\n";
   Preamble += "  }\n";
+  Preamble += "};\n";
+  
+  // Declaration required for implementation of @autoreleasepool statement.
+  Preamble += "extern \"C\" __declspec(dllimport) void * objc_autoreleasePoolPush(void);\n";
+  Preamble += "extern \"C\" __declspec(dllimport) void objc_autoreleasePoolPop(void *);\n\n";
+  Preamble += "struct __AtAutoreleasePool {\n";
+  Preamble += "  __AtAutoreleasePool() {atautoreleasepoolobj = objc_autoreleasePoolPush();}\n";
+  Preamble += "  ~__AtAutoreleasePool() {objc_autoreleasePoolPop(atautoreleasepoolobj);}\n";
+  Preamble += "  void * atautoreleasepoolobj;\n";
   Preamble += "};\n";
   
   // NOTE! Windows uses LLP64 for 64bit mode. So, cast pointer to long long
@@ -6726,7 +6750,7 @@ void RewriteModernObjC::RewriteObjCProtocolMetaData(ObjCProtocolDecl *PDecl,
   std::vector<ObjCPropertyDecl *> ProtocolProperties;
   for (ObjCContainerDecl::prop_iterator I = PDecl->prop_begin(),
        E = PDecl->prop_end(); I != E; ++I)
-    ProtocolProperties.push_back(&*I);
+    ProtocolProperties.push_back(*I);
   
   Write_prop_list_t_initializer(*this, Context, Result, ProtocolProperties,
                                  /* Container */0,
@@ -6947,7 +6971,7 @@ void RewriteModernObjC::RewriteObjCClassMetaData(ObjCImplementationDecl *IDecl,
   std::vector<ObjCPropertyDecl *> ClassProperties;
   for (ObjCContainerDecl::prop_iterator I = CDecl->prop_begin(),
        E = CDecl->prop_end(); I != E; ++I)
-    ClassProperties.push_back(&*I);
+    ClassProperties.push_back(*I);
   
   Write_prop_list_t_initializer(*this, Context, Result, ClassProperties,
                                  /* Container */IDecl,
@@ -7209,7 +7233,7 @@ void RewriteModernObjC::RewriteObjCCategoryImplDecl(ObjCCategoryImplDecl *IDecl,
   std::vector<ObjCPropertyDecl *> ClassProperties;
   for (ObjCContainerDecl::prop_iterator I = CDecl->prop_begin(),
        E = CDecl->prop_end(); I != E; ++I)
-    ClassProperties.push_back(&*I);
+    ClassProperties.push_back(*I);
   
   Write_prop_list_t_initializer(*this, Context, Result, ClassProperties,
                                 /* Container */IDecl,
@@ -7412,7 +7436,7 @@ Stmt *RewriteModernObjC::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV) {
                                             &Context->Idents.get(D->getNameAsString()),
                                             IvarT, 0,
                                             /*BitWidth=*/0, /*Mutable=*/true,
-                                            /*HasInit=*/false);
+                                            ICIS_NoInit);
           MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
                                                     FD->getType(), VK_LValue,
                                                     OK_Ordinary);

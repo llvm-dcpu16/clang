@@ -85,7 +85,13 @@ typedef double NSTimeInterval;
 - (id)initWithBytes:(const void *)bytes length:(NSUInteger)len encoding:(NSStringEncoding)encoding;
 - (id)initWithBytesNoCopy:(void *)bytes length:(NSUInteger)len encoding:(NSStringEncoding)encoding freeWhenDone:(BOOL)freeBuffer;
 + (id)stringWithUTF8String:(const char *)nullTerminatedCString;
++ (id)stringWithString:(NSString *)string;
 @end        @class NSString, NSURL, NSError;
+
+@interface NSMutableString : NSString
+- (void)appendFormat:(NSString *)format, ... __attribute__((format(__NSString__, 1, 2)));
+@end
+
 @interface NSData : NSObject <NSCopying, NSMutableCopying, NSCoding>  - (NSUInteger)length;
 + (id)dataWithBytesNoCopy:(void *)bytes length:(NSUInteger)length;
 + (id)dataWithBytesNoCopy:(void *)bytes length:(NSUInteger)length freeWhenDone:(BOOL)b;
@@ -114,3 +120,11 @@ extern CFStringRef CFStringCreateWithCStringNoCopy(CFAllocatorRef alloc, const c
 extern void CFStringAppend(CFMutableStringRef theString, CFStringRef appendedString);
 
 void SystemHeaderFunctionWithBlockParam(void *, void (^block)(void *), unsigned);
+
+@interface NSPointerArray : NSObject <NSFastEnumeration, NSCopying, NSCoding>
+- (void)addPointer:(void *)pointer;
+- (void)insertPointer:(void *)item atIndex:(NSUInteger)index;
+- (void)replacePointerAtIndex:(NSUInteger)index withPointer:(void *)item;
+- (void *)pointerAtIndex:(NSUInteger)index;
+@end
+

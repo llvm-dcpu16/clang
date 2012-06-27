@@ -1068,7 +1068,8 @@ bool CursorVisitor::VisitObjCImplementationDecl(ObjCImplementationDecl *D) {
 
 bool CursorVisitor::VisitObjCPropertyImplDecl(ObjCPropertyImplDecl *PD) {
   if (ObjCIvarDecl *Ivar = PD->getPropertyIvarDecl())
-    return Visit(MakeCursorMemberRef(Ivar, PD->getPropertyIvarDeclLoc(), TU));
+    if (PD->isIvarNameSpecified())
+      return Visit(MakeCursorMemberRef(Ivar, PD->getPropertyIvarDeclLoc(), TU));
   
   return false;
 }
@@ -2692,6 +2693,8 @@ int clang_saveTranslationUnit(CXTranslationUnit TU, const char *FileName,
 
   ASTUnit *CXXUnit = static_cast<ASTUnit *>(TU->TUData);
   ASTUnit::ConcurrencyCheck Check(*CXXUnit);
+  if (!CXXUnit->hasSema())
+    return CXSaveError_InvalidTU;
 
   SaveTranslationUnitInfo STUI = { TU, FileName, options, CXSaveError_None };
 
@@ -3503,6 +3506,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
       return createCXString("ReturnStmt");
   case CXCursor_AsmStmt:
       return createCXString("AsmStmt");
+  case CXCursor_MSAsmStmt:
+      return createCXString("MSAsmStmt");
   case CXCursor_ObjCAtTryStmt:
       return createCXString("ObjCAtTryStmt");
   case CXCursor_ObjCAtCatchStmt:
@@ -3611,12 +3616,15 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
 struct GetCursorData {
   SourceLocation TokenBeginLoc;
   bool PointsAtMacroArgExpansion;
+  bool VisitedObjCPropertyImplDecl;
+  SourceLocation VisitedDeclaratorDeclStartLoc;
   CXCursor &BestCursor;
 
   GetCursorData(SourceManager &SM,
                 SourceLocation tokenBegin, CXCursor &outputCursor)
     : TokenBeginLoc(tokenBegin), BestCursor(outputCursor) {
     PointsAtMacroArgExpansion = SM.isMacroArgExpansion(tokenBegin);
+    VisitedObjCPropertyImplDecl = false;
   }
 };
 
@@ -3656,6 +3664,32 @@ static enum CXChildVisitResult GetCursorVisitor(CXCursor cursor,
              !ID->isThisDeclarationADefinition())
            return CXChildVisit_Break;
         }
+
+    } else if (DeclaratorDecl *DD
+                    = dyn_cast_or_null<DeclaratorDecl>(getCursorDecl(cursor))) {
+      SourceLocation StartLoc = DD->getSourceRange().getBegin();
+      // Check that when we have multiple declarators in the same line,
+      // that later ones do not override the previous ones.
+      // If we have:
+      // int Foo, Bar;
+      // source ranges for both start at 'int', so 'Bar' will end up overriding
+      // 'Foo' even though the cursor location was at 'Foo'.
+      if (Data->VisitedDeclaratorDeclStartLoc == StartLoc)
+        return CXChildVisit_Break;
+      Data->VisitedDeclaratorDeclStartLoc = StartLoc;
+
+    } else if (ObjCPropertyImplDecl *PropImp
+              = dyn_cast_or_null<ObjCPropertyImplDecl>(getCursorDecl(cursor))) {
+      (void)PropImp;
+      // Check that when we have multiple @synthesize in the same line,
+      // that later ones do not override the previous ones.
+      // If we have:
+      // @synthesize Foo, Bar;
+      // source ranges for both start at '@', so 'Bar' will end up overriding
+      // 'Foo' even though the cursor location was at 'Foo'.
+      if (Data->VisitedObjCPropertyImplDecl)
+        return CXChildVisit_Break;
+      Data->VisitedObjCPropertyImplDecl = true;
     }
   }
 
@@ -5642,7 +5676,35 @@ CXFile clang_getIncludedFile(CXCursor cursor) {
   InclusionDirective *ID = getCursorInclusionDirective(cursor);
   return (void *)ID->getFile();
 }
-  
+
+CXSourceRange clang_Cursor_getCommentRange(CXCursor C) {
+  if (!clang_isDeclaration(C.kind))
+    return clang_getNullRange();
+
+  const Decl *D = getCursorDecl(C);
+  ASTContext &Context = getCursorContext(C);
+  const RawComment *RC = Context.getRawCommentForDecl(D);
+  if (!RC)
+    return clang_getNullRange();
+
+  return cxloc::translateSourceRange(Context, RC->getSourceRange());
+}
+
+CXString clang_Cursor_getRawCommentText(CXCursor C) {
+  if (!clang_isDeclaration(C.kind))
+    return createCXString((const char *) NULL);
+
+  const Decl *D = getCursorDecl(C);
+  ASTContext &Context = getCursorContext(C);
+  const RawComment *RC = Context.getRawCommentForDecl(D);
+  StringRef RawText = RC ? RC->getRawText(Context.getSourceManager()) :
+                           StringRef();
+
+  // Don't duplicate the string because RawText points directly into source
+  // code.
+  return createCXString(RawText, false);
+}
+
 } // end: extern "C"
 
 

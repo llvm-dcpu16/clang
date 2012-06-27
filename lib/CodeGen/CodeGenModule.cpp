@@ -135,10 +135,21 @@ CodeGenModule::~CodeGenModule() {
 }
 
 void CodeGenModule::createObjCRuntime() {
-  if (!LangOpts.NeXTRuntime)
+  // This is just isGNUFamily(), but we want to force implementors of
+  // new ABIs to decide how best to do this.
+  switch (LangOpts.ObjCRuntime.getKind()) {
+  case ObjCRuntime::GNU:
+  case ObjCRuntime::FragileGNU:
     ObjCRuntime = CreateGNUObjCRuntime(*this);
-  else
+    return;
+
+  case ObjCRuntime::FragileMacOSX:
+  case ObjCRuntime::MacOSX:
+  case ObjCRuntime::iOS:
     ObjCRuntime = CreateMacObjCRuntime(*this);
+    return;
+  }
+  llvm_unreachable("bad runtime kind");
 }
 
 void CodeGenModule::createOpenCLRuntime() {
@@ -336,7 +347,8 @@ StringRef CodeGenModule::getMangledName(GlobalDecl GD) {
   else if (const CXXDestructorDecl *D = dyn_cast<CXXDestructorDecl>(ND))
     getCXXABI().getMangleContext().mangleCXXDtor(D, GD.getDtorType(), Out);
   else if (const BlockDecl *BD = dyn_cast<BlockDecl>(ND))
-    getCXXABI().getMangleContext().mangleBlock(BD, Out);
+    getCXXABI().getMangleContext().mangleBlock(BD, Out,
+      dyn_cast_or_null<VarDecl>(initializedGlobalDecl.getDecl()));
   else
     getCXXABI().getMangleContext().mangleName(ND, Out);
 
@@ -357,7 +369,8 @@ void CodeGenModule::getBlockMangledName(GlobalDecl GD, MangleBuffer &Buffer,
   const Decl *D = GD.getDecl();
   llvm::raw_svector_ostream Out(Buffer.getBuffer());
   if (D == 0)
-    MangleCtx.mangleGlobalBlock(BD, Out);
+    MangleCtx.mangleGlobalBlock(BD, 
+      dyn_cast_or_null<VarDecl>(initializedGlobalDecl.getDecl()), Out);
   else if (const CXXConstructorDecl *CD = dyn_cast<CXXConstructorDecl>(D))
     MangleCtx.mangleCtorBlock(CD, GD.getCtorType(), BD, Out);
   else if (const CXXDestructorDecl *DD = dyn_cast<CXXDestructorDecl>(D))
@@ -476,8 +489,7 @@ void CodeGenModule::SetLLVMFunctionAttributes(const Decl *D,
   unsigned CallingConv;
   AttributeListType AttributeList;
   ConstructAttributeList(Info, D, AttributeList, CallingConv);
-  F->setAttributes(llvm::AttrListPtr::get(AttributeList.begin(),
-                                          AttributeList.size()));
+  F->setAttributes(llvm::AttrListPtr::get(AttributeList));
   F->setCallingConv(static_cast<llvm::CallingConv::ID>(CallingConv));
 }
 
@@ -495,7 +507,7 @@ static bool hasUnwindExceptions(const LangOptions &LangOpts) {
 
   // If ObjC exceptions are enabled, this depends on the ABI.
   if (LangOpts.ObjCExceptions) {
-    if (!LangOpts.ObjCNonFragileABI) return false;
+    if (LangOpts.ObjCRuntime.isFragile()) return false;
   }
 
   return true;
@@ -519,9 +531,13 @@ void CodeGenModule::SetLLVMFunctionAttributesForDefinition(const Decl *D,
     F->addFnAttr(llvm::Attribute::NoInline);
 
   // (noinline wins over always_inline, and we can't specify both in IR)
-  if (D->hasAttr<AlwaysInlineAttr>() &&
+  if ((D->hasAttr<AlwaysInlineAttr>() || D->hasAttr<ForceInlineAttr>()) &&
       !F->hasFnAttr(llvm::Attribute::NoInline))
     F->addFnAttr(llvm::Attribute::AlwaysInline);
+
+  // FIXME: Communicate hot and cold attributes to LLVM more directly.
+  if (D->hasAttr<ColdAttr>())
+    F->addFnAttr(llvm::Attribute::OptimizeForSize);
 
   if (isa<CXXConstructorDecl>(D) || isa<CXXDestructorDecl>(D))
     F->setUnnamedAddr(true);
@@ -654,7 +670,7 @@ void CodeGenModule::EmitDeferred() {
     if (!DeferredVTables.empty()) {
       const CXXRecordDecl *RD = DeferredVTables.back();
       DeferredVTables.pop_back();
-      getVTables().GenerateClassData(getVTableLinkage(RD), RD);
+      getCXXABI().EmitVTables(RD);
       continue;
     }
 
@@ -932,7 +948,7 @@ CodeGenModule::shouldEmitFunction(const FunctionDecl *F) {
   if (getFunctionLinkage(F) != llvm::Function::AvailableExternallyLinkage)
     return true;
   if (CodeGenOpts.OptimizationLevel == 0 &&
-      !F->hasAttr<AlwaysInlineAttr>())
+      !F->hasAttr<AlwaysInlineAttr>() && !F->hasAttr<ForceInlineAttr>())
     return false;
   // PR9614. Avoid cases where the source code is lying to us. An available
   // externally function should have an equivalent function somewhere else,
@@ -1168,11 +1184,12 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
     DeferredDecls.erase(DDI);
   }
 
+  unsigned AddrSpace = GetGlobalVarAddressSpace(D, Ty->getAddressSpace());
   llvm::GlobalVariable *GV =
     new llvm::GlobalVariable(getModule(), Ty->getElementType(), false,
                              llvm::GlobalValue::ExternalLinkage,
                              0, MangledName, 0,
-                             false, Ty->getAddressSpace());
+                             llvm::GlobalVariable::NotThreadLocal, AddrSpace);
 
   // Handle things which are present even on external declarations.
   if (D) {
@@ -1196,9 +1213,18 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
     }
 
     GV->setThreadLocal(D->isThreadSpecified());
+
+    // Set the TLS model if it it's explicitly specified.
+    if (D->hasAttr<TLSModelAttr>()) {
+      const TLSModelAttr *Attr = D->getAttr<TLSModelAttr>();
+      GV->setThreadLocalMode(GetLLVMTLSModel(Attr->getModel()));
+    }
   }
 
-  return GV;
+  if (AddrSpace != Ty->getAddressSpace())
+    return llvm::ConstantExpr::getBitCast(GV, Ty);
+  else
+    return GV;
 }
 
 
@@ -1288,7 +1314,7 @@ void CodeGenModule::EmitTentativeDefinition(const VarDecl *D) {
 
 void CodeGenModule::EmitVTable(CXXRecordDecl *Class, bool DefinitionRequired) {
   if (DefinitionRequired)
-    getVTables().GenerateClassData(getVTableLinkage(Class), Class);
+    getCXXABI().EmitVTables(Class);
 }
 
 llvm::GlobalVariable::LinkageTypes 
@@ -1483,6 +1509,20 @@ CodeGenModule::MaybeEmitGlobalStdInitializerListInitializer(const VarDecl *D,
   return llvmInit;
 }
 
+unsigned CodeGenModule::GetGlobalVarAddressSpace(const VarDecl *D,
+                                                 unsigned AddrSpace) {
+  if (LangOpts.CUDA && CodeGenOpts.CUDAIsDevice) {
+    if (D->hasAttr<CUDAConstantAttr>())
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_constant);
+    else if (D->hasAttr<CUDASharedAttr>())
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_shared);
+    else
+      AddrSpace = getContext().getTargetAddressSpace(LangAS::cuda_device);
+  }
+
+  return AddrSpace;
+}
+
 void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   llvm::Constant *Init = 0;
   QualType ASTTy = D->getType();
@@ -1513,8 +1553,10 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
     // FIXME: It does so in a global constructor, which is *not* what we
     // want.
 
-    if (!Init)
+    if (!Init) {
+      initializedGlobalDecl = GlobalDecl(D);
       Init = EmitConstantInit(*InitDecl);
+    }
     if (!Init) {
       QualType T = InitExpr->getType();
       if (D->getType()->isReferenceType())
@@ -1562,7 +1604,7 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   if (GV == 0 ||
       GV->getType()->getElementType() != InitType ||
       GV->getType()->getAddressSpace() !=
-        getContext().getTargetAddressSpace(ASTTy)) {
+       GetGlobalVarAddressSpace(D, getContext().getTargetAddressSpace(ASTTy))) {
 
     // Move the old entry aside so that we'll create a new one.
     Entry->setName(StringRef());
@@ -1713,8 +1755,7 @@ static void ReplaceUsesOfNonProtoTypeWithRealFunction(llvm::GlobalValue *Old,
     ArgList.clear();
     if (!NewCall->getType()->isVoidTy())
       NewCall->takeName(CI);
-    NewCall->setAttributes(llvm::AttrListPtr::get(AttrVec.begin(),
-                                                  AttrVec.end()));
+    NewCall->setAttributes(llvm::AttrListPtr::get(AttrVec));
     NewCall->setCallingConv(CI->getCallingConv());
 
     // Finally, remove the old call, replacing any uses with the new one.
@@ -2062,7 +2103,7 @@ CodeGenModule::GetAddrOfConstantString(const StringLiteral *Literal) {
     std::string StringClass(getLangOpts().ObjCConstantStringClass);
     llvm::Type *Ty = getTypes().ConvertType(getContext().IntTy);
     llvm::Constant *GV;
-    if (LangOpts.ObjCNonFragileABI) {
+    if (LangOpts.ObjCRuntime.isNonFragile()) {
       std::string str = 
         StringClass.empty() ? "OBJC_CLASS_$_NSConstantString" 
                             : "OBJC_CLASS_$_" + StringClass;
@@ -2107,7 +2148,7 @@ CodeGenModule::GetAddrOfConstantString(const StringLiteral *Literal) {
                                            FieldTypes[i], /*TInfo=*/0,
                                            /*BitWidth=*/0,
                                            /*Mutable=*/false,
-                                           /*HasInit=*/false);
+                                           ICIS_NoInit);
       Field->setAccess(AS_public);
       D->addDecl(Field);
     }
@@ -2150,7 +2191,7 @@ CodeGenModule::GetAddrOfConstantString(const StringLiteral *Literal) {
                                 "_unnamed_nsstring_");
   // FIXME. Fix section.
   if (const char *Sect = 
-        LangOpts.ObjCNonFragileABI 
+        LangOpts.ObjCRuntime.isNonFragile() 
           ? getContext().getTargetInfo().getNSStringNonFragileABISection() 
           : getContext().getTargetInfo().getNSStringSection())
     GV->setSection(Sect);
@@ -2182,7 +2223,7 @@ QualType CodeGenModule::getObjCFastEnumerationStateType() {
                                            FieldTypes[i], /*TInfo=*/0,
                                            /*BitWidth=*/0,
                                            /*Mutable=*/false,
-                                           /*HasInit=*/false);
+                                           ICIS_NoInit);
       Field->setAccess(AS_public);
       D->addDecl(Field);
     }
@@ -2353,7 +2394,7 @@ void CodeGenModule::EmitObjCPropertyImplementations(const
                                                     ObjCImplementationDecl *D) {
   for (ObjCImplementationDecl::propimpl_iterator
          i = D->propimpl_begin(), e = D->propimpl_end(); i != e; ++i) {
-    ObjCPropertyImplDecl *PID = &*i;
+    ObjCPropertyImplDecl *PID = *i;
 
     // Dynamic is just for type-checking.
     if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize) {
@@ -2541,7 +2582,7 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
 
   case Decl::ObjCImplementation: {
     ObjCImplementationDecl *OMD = cast<ObjCImplementationDecl>(D);
-    if (LangOpts.ObjCNonFragileABI2 && OMD->hasSynthBitfield())
+    if (LangOpts.ObjCRuntime.isNonFragile() && OMD->hasSynthBitfield())
       Context.ResetObjCLayout(OMD->getClassInterface());
     EmitObjCPropertyImplementations(OMD);
     EmitObjCIvarInitializations(OMD);

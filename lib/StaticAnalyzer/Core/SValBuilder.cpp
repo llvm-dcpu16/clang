@@ -13,6 +13,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/DeclCXX.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/MemRegion.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SVals.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/SValBuilder.h"
@@ -148,6 +149,18 @@ SValBuilder::getConjuredSymbolVal(const Stmt *stmt,
   return nonloc::SymbolVal(sym);
 }
 
+DefinedOrUnknownSVal
+SValBuilder::getConjuredHeapSymbolVal(const Expr *E,
+                                      const LocationContext *LCtx,
+                                      unsigned VisitCount) {
+  QualType T = E->getType();
+  assert(Loc::isLocType(T));
+  assert(SymbolManager::canSymbolicate(T));
+
+  SymbolRef sym = SymMgr.getConjuredSymbol(E, LCtx, T, VisitCount);
+  return loc::MemRegionVal(MemMgr.getSymbolicHeapRegion(sym));
+}
+
 DefinedSVal SValBuilder::getMetadataSymbolVal(const void *symbolTag,
                                               const MemRegion *region,
                                               const Expr *expr, QualType type,
@@ -190,6 +203,21 @@ DefinedSVal SValBuilder::getBlockPointer(const BlockDecl *block,
     MemMgr.getBlockTextRegion(block, locTy, locContext->getAnalysisDeclContext());
   const BlockDataRegion *BD = MemMgr.getBlockDataRegion(BC, locContext);
   return loc::MemRegionVal(BD);
+}
+
+/// Return a memory region for the 'this' object reference.
+loc::MemRegionVal SValBuilder::getCXXThis(const CXXMethodDecl *D,
+                                          const StackFrameContext *SFC) {
+  return loc::MemRegionVal(getRegionManager().
+                           getCXXThisRegion(D->getThisType(getContext()), SFC));
+}
+
+/// Return a memory region for the 'this' object reference.
+loc::MemRegionVal SValBuilder::getCXXThis(const CXXRecordDecl *D,
+                                          const StackFrameContext *SFC) {
+  const Type *T = D->getTypeForDecl();
+  QualType PT = getContext().getPointerType(QualType(T, 0));
+  return loc::MemRegionVal(getRegionManager().getCXXThisRegion(PT, SFC));
 }
 
 //===----------------------------------------------------------------------===//
@@ -325,7 +353,7 @@ SVal SValBuilder::evalCast(SVal val, QualType castTy, QualType originalTy) {
 
     // Are we casting from an array to a pointer?  If so just pass on
     // the decayed value.
-    if (castTy->isPointerType())
+    if (castTy->isPointerType() || castTy->isReferenceType())
       return val;
 
     // Are we casting from an array to an integer?  If so, cast the decayed

@@ -102,7 +102,10 @@ class ToolInvocation {
  public:
   /// \brief Create a tool invocation.
   ///
-  /// \param CommandLine The command line arguments to clang.
+  /// \param CommandLine The command line arguments to clang. Note that clang
+  /// uses its binary name (CommandLine[0]) to locate its builtin headers.
+  /// Callers have to ensure that they are installed in a compatible location
+  /// (see clang driver implementation) or mapped in via mapVirtualFile.
   /// \param ToolAction The action to be executed. Class takes ownership.
   /// \param Files The FileManager used for the execution. Class does not take
   /// ownership.
@@ -126,8 +129,7 @@ class ToolInvocation {
   bool runInvocation(const char *BinaryName,
                      clang::driver::Compilation *Compilation,
                      clang::CompilerInvocation *Invocation,
-                     const clang::driver::ArgStringList &CC1Args,
-                     clang::FrontendAction *ToolAction);
+                     const clang::driver::ArgStringList &CC1Args);
 
   std::vector<std::string> CommandLine;
   llvm::OwningPtr<FrontendAction> ToolAction;
@@ -220,4 +222,3 @@ FrontendActionFactory *newFrontendActionFactory(FactoryT *ActionFactory) {
 } // end namespace clang
 
 #endif // LLVM_CLANG_TOOLING_TOOLING_H
-

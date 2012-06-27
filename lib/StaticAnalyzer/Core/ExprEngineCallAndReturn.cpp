@@ -41,7 +41,7 @@ void ExprEngine::processCallEnter(CallEnter CE, ExplodedNode *Pred) {
   // formal arguments.
   const LocationContext *callerCtx = Pred->getLocationContext();
   ProgramStateRef state = Pred->getState()->enterStackFrame(callerCtx,
-                                                                calleeCtx);
+                                                            calleeCtx);
   
   // Construct a new node and add it to the worklist.
   bool isNew;
@@ -103,7 +103,12 @@ void ExprEngine::processCallExit(ExplodedNode *CEBNode) {
 
   const StackFrameContext *calleeCtx =
       CEBNode->getLocationContext()->getCurrentStackFrame();
-  const LocationContext *callerCtx = calleeCtx->getParent();
+  
+  // The parent context might not be a stack frame, so make sure we
+  // look up the first enclosing stack frame.
+  const StackFrameContext *callerCtx =
+    calleeCtx->getParent()->getCurrentStackFrame();
+  
   const Stmt *CE = calleeCtx->getCallSite();
   ProgramStateRef state = CEBNode->getState();
   // Find the last statement in the function and the corresponding basic block.
@@ -122,10 +127,10 @@ void ExprEngine::processCallExit(ExplodedNode *CEBNode) {
 
   // Bind the constructed object value to CXXConstructExpr.
   if (const CXXConstructExpr *CCE = dyn_cast<CXXConstructExpr>(CE)) {
-    const CXXThisRegion *ThisR =
-        getCXXThisRegion(CCE->getConstructor()->getParent(), calleeCtx);
+    loc::MemRegionVal This =
+      svalBuilder.getCXXThis(CCE->getConstructor()->getParent(), calleeCtx);
+    SVal ThisV = state->getSVal(This);
 
-    SVal ThisV = state->getSVal(ThisR);
     // Always bind the region to the CXXConstructExpr.
     state = state->BindExpr(CCE, CEBNode->getLocationContext(), ThisV);
   }
@@ -154,6 +159,8 @@ void ExprEngine::processCallExit(ExplodedNode *CEBNode) {
     removeDead(BindedRetNode, CleanedNodes, 0, callerCtx, LastSt,
                ProgramPoint::PostStmtPurgeDeadSymbolsKind);
     currentBuilderContext = 0;
+  } else {
+    CleanedNodes.Add(CEBNode);
   }
 
   for (ExplodedNodeSet::iterator I = CleanedNodes.begin(),
@@ -199,8 +206,8 @@ static unsigned getNumberStackFrames(const LocationContext *LCtx) {
 }
 
 // Determine if we should inline the call.
-bool ExprEngine::shouldInlineDecl(const FunctionDecl *FD, ExplodedNode *Pred) {
-  AnalysisDeclContext *CalleeADC = AMgr.getAnalysisDeclContext(FD);
+bool ExprEngine::shouldInlineDecl(const Decl *D, ExplodedNode *Pred) {
+  AnalysisDeclContext *CalleeADC = AMgr.getAnalysisDeclContext(D);
   const CFG *CalleeCFG = CalleeADC->getCFG();
 
   // It is possible that the CFG cannot be constructed.
@@ -212,79 +219,92 @@ bool ExprEngine::shouldInlineDecl(const FunctionDecl *FD, ExplodedNode *Pred) {
         == AMgr.InlineMaxStackDepth)
     return false;
 
-  if (Engine.FunctionSummaries->hasReachedMaxBlockCount(FD))
+  if (Engine.FunctionSummaries->hasReachedMaxBlockCount(D))
     return false;
 
   if (CalleeCFG->getNumBlockIDs() > AMgr.InlineMaxFunctionSize)
     return false;
 
-  return true;
-}
-
-// For now, skip inlining variadic functions.
-// We also don't inline blocks.
-static bool shouldInlineCallExpr(const CallExpr *CE, ExprEngine *E) {
-  if (!E->getAnalysisManager().shouldInlineCall())
-    return false;
-  QualType callee = CE->getCallee()->getType();
-  const FunctionProtoType *FT = 0;
-  if (const PointerType *PT = callee->getAs<PointerType>())
-    FT = dyn_cast<FunctionProtoType>(PT->getPointeeType());
-  else if (const BlockPointerType *BT = callee->getAs<BlockPointerType>()) {
-    // FIXME: inline blocks.
-    // FT = dyn_cast<FunctionProtoType>(BT->getPointeeType());
-    (void) BT;
-    return false;
+  // Do not inline variadic calls (for now).
+  if (const BlockDecl *BD = dyn_cast<BlockDecl>(D)) {
+    if (BD->isVariadic())
+      return false;
   }
-  // If we have no prototype, assume the function is okay.
-  if (!FT)
-    return true;
+  else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
+    if (FD->isVariadic())
+      return false;
+  }
 
-  // Skip inlining of variadic functions.
-  return !FT->isVariadic();
+  return true;
 }
 
 bool ExprEngine::InlineCall(ExplodedNodeSet &Dst,
                             const CallExpr *CE, 
                             ExplodedNode *Pred) {
-  if (!shouldInlineCallExpr(CE, this))
+  if (!getAnalysisManager().shouldInlineCall())
     return false;
+
+  //  if (!shouldInlineCallExpr(CE, this))
+  //    return false;
+
+  const StackFrameContext *CallerSFC =
+    Pred->getLocationContext()->getCurrentStackFrame();
 
   ProgramStateRef state = Pred->getState();
   const Expr *Callee = CE->getCallee();
-  const FunctionDecl *FD =
-    state->getSVal(Callee, Pred->getLocationContext()).getAsFunctionDecl();
-  if (!FD || !FD->hasBody(FD))
+  SVal CalleeVal = state->getSVal(Callee, Pred->getLocationContext());
+  const Decl *D = 0;
+  const LocationContext *ParentOfCallee = 0;
+  
+  if (const FunctionDecl *FD = CalleeVal.getAsFunctionDecl()) {
+    if (!FD->hasBody(FD))
+      return false;
+  
+    switch (CE->getStmtClass()) {
+      default:
+        break;
+      case Stmt::CXXMemberCallExprClass:
+      case Stmt::CallExprClass: {
+        D = FD;
+        break;
+        
+      }
+    }
+  } else if (const BlockDataRegion *BR =
+              dyn_cast_or_null<BlockDataRegion>(CalleeVal.getAsRegion())) {
+    assert(CE->getStmtClass() == Stmt::CallExprClass);
+    const BlockDecl *BD = BR->getDecl();
+    D = BD;
+    AnalysisDeclContext *BlockCtx = AMgr.getAnalysisDeclContext(BD);
+    ParentOfCallee = BlockCtx->getBlockInvocationContext(CallerSFC,
+                                                         BD,
+                                                         BR);
+  } else {
+    // This is case we don't handle yet.
+    return false;
+  }
+  
+  if (!D || !shouldInlineDecl(D, Pred))
     return false;
   
-  switch (CE->getStmtClass()) {
-    default:
-      // FIXME: Handle C++.
-      break;
-    case Stmt::CallExprClass: {
-      if (!shouldInlineDecl(FD, Pred))
-        return false;
+  if (!ParentOfCallee)
+    ParentOfCallee = CallerSFC;
 
-      // Construct a new stack frame for the callee.
-      AnalysisDeclContext *CalleeADC = AMgr.getAnalysisDeclContext(FD);
-      const StackFrameContext *CallerSFC =
-      Pred->getLocationContext()->getCurrentStackFrame();
-      const StackFrameContext *CalleeSFC =
-      CalleeADC->getStackFrame(CallerSFC, CE,
-                               currentBuilderContext->getBlock(),
-                               currentStmtIdx);
-      
-      CallEnter Loc(CE, CalleeSFC, Pred->getLocationContext());
-      bool isNew;
-      if (ExplodedNode *N = G.getNode(Loc, state, false, &isNew)) {
-        N->addPredecessor(Pred, G);
-        if (isNew)
-          Engine.getWorkList()->enqueue(N);
-      }
-      return true;
-    }
+  // Construct a new stack frame for the callee.
+  AnalysisDeclContext *CalleeADC = AMgr.getAnalysisDeclContext(D);
+  const StackFrameContext *CalleeSFC =
+    CalleeADC->getStackFrame(ParentOfCallee, CE,
+                             currentBuilderContext->getBlock(),
+                             currentStmtIdx);
+  
+  CallEnter Loc(CE, CalleeSFC, Pred->getLocationContext());
+  bool isNew;
+  if (ExplodedNode *N = G.getNode(Loc, state, false, &isNew)) {
+    N->addPredecessor(Pred, G);
+    if (isNew)
+      Engine.getWorkList()->enqueue(N);
   }
-  return false;
+  return true;
 }
 
 static bool isPointerToConst(const ParmVarDecl *ParamDecl) {
@@ -510,7 +530,7 @@ void ExprEngine::VisitCallExpr(const CallExpr *CE, ExplodedNode *Pred,
       else
         ResultTy = CE->getType();
 
-      if (CE->isLValue())
+      if (CE->isGLValue())
         ResultTy = Eng.getContext().getPointerType(ResultTy);
 
       // Conjure a symbol value to use as the result.

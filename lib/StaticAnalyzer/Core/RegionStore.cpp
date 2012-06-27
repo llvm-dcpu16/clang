@@ -394,6 +394,12 @@ public: // Part of public interface to class.
                            const LocationContext *callerCtx,
                            const StackFrameContext *calleeCtx);
 
+  StoreRef enterStackFrame(ProgramStateRef state,
+                           const FunctionDecl *FD,
+                           const LocationContext *callerCtx,
+                           const StackFrameContext *calleeCtx);
+
+  
   //===------------------------------------------------------------------===//
   // Region "extents".
   //===------------------------------------------------------------------===//
@@ -1049,8 +1055,12 @@ SVal RegionStoreManager::getBinding(Store store, Loc L, QualType T) {
   if (RTy->isUnionType())
     return UnknownVal();
 
-  if (RTy->isArrayType())
-    return getBindingForArray(store, R);
+  if (RTy->isArrayType()) {
+    if (RTy->isConstantArrayType())
+      return getBindingForArray(store, R);
+    else
+      return UnknownVal();
+  }
 
   // FIXME: handle Vector types.
   if (RTy->isVectorType())
@@ -1740,7 +1750,7 @@ StoreRef RegionStoreManager::BindStruct(Store store, const TypedValueRegion* R,
       continue;
 
     QualType FTy = FI->getType();
-    const FieldRegion* FR = MRMgr.getFieldRegion(&*FI, R);
+    const FieldRegion* FR = MRMgr.getFieldRegion(*FI, R);
 
     if (FTy->isArrayType())
       newStore = BindArray(newStore.getStore(), FR, *VI);
@@ -1944,8 +1954,18 @@ void removeDeadBindingsWorker::VisitBinding(SVal V) {
   }
 
   // If V is a region, then add it to the worklist.
-  if (const MemRegion *R = V.getAsRegion())
+  if (const MemRegion *R = V.getAsRegion()) {
     AddToWorkList(R);
+    
+    // All regions captured by a block are also live.
+    if (const BlockDataRegion *BR = dyn_cast<BlockDataRegion>(R)) {
+      BlockDataRegion::referenced_vars_iterator I = BR->referenced_vars_begin(),
+                                                E = BR->referenced_vars_end();
+        for ( ; I != E; ++I)
+          AddToWorkList(I.getCapturedRegion());
+    }
+  }
+    
 
   // Update the set of live symbols.
   for (SymExpr::symbol_iterator SI = V.symbol_begin(), SE = V.symbol_end();
@@ -1964,21 +1984,6 @@ void removeDeadBindingsWorker::VisitBindingKey(BindingKey K) {
     // should continue to track that symbol.
     if (const SymbolicRegion *SymR = dyn_cast<SymbolicRegion>(R))
       SymReaper.markLive(SymR->getSymbol());
-
-    // For BlockDataRegions, enqueue the VarRegions for variables marked
-    // with __block (passed-by-reference).
-    // via BlockDeclRefExprs.
-    if (const BlockDataRegion *BD = dyn_cast<BlockDataRegion>(R)) {
-      for (BlockDataRegion::referenced_vars_iterator
-           RI = BD->referenced_vars_begin(), RE = BD->referenced_vars_end();
-           RI != RE; ++RI) {
-        if ((*RI)->getDecl()->getAttr<BlocksAttr>())
-          AddToWorkList(*RI);
-      }
-
-      // No possible data bindings on a BlockDataRegion.
-      return;
-    }
   }
 
   // Visit the data binding for K.
@@ -2045,12 +2050,37 @@ StoreRef RegionStoreManager::removeDeadBindings(Store store,
   return StoreRef(B.getRootWithoutRetain(), *this);
 }
 
-
 StoreRef RegionStoreManager::enterStackFrame(ProgramStateRef state,
                                              const LocationContext *callerCtx,
                                              const StackFrameContext *calleeCtx)
 {
-  FunctionDecl const *FD = cast<FunctionDecl>(calleeCtx->getDecl());
+  const Decl *D = calleeCtx->getDecl();
+  if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(D))
+    return enterStackFrame(state, FD, callerCtx, calleeCtx);
+  
+  // FIXME: when we handle more cases, this will need to be expanded.
+  
+  const BlockDecl *BD = cast<BlockDecl>(D);
+  BlockDecl::param_const_iterator PI = BD->param_begin(),
+                                  PE = BD->param_end();
+  StoreRef store = StoreRef(state->getStore(), *this);
+  const CallExpr *CE = cast<CallExpr>(calleeCtx->getCallSite());
+  CallExpr::const_arg_iterator AI = CE->arg_begin(), AE = CE->arg_end();
+  for (; AI != AE && PI != PE; ++AI, ++PI) {
+    SVal ArgVal = state->getSVal(*AI, callerCtx);
+    store = Bind(store.getStore(),
+                 svalBuilder.makeLoc(MRMgr.getVarRegion(*PI, calleeCtx)),
+                 ArgVal);
+  }
+  
+  return store;
+}
+
+StoreRef RegionStoreManager::enterStackFrame(ProgramStateRef state,
+                                             const FunctionDecl *FD,
+                                             const LocationContext *callerCtx,
+                                             const StackFrameContext *calleeCtx)
+{
   FunctionDecl::param_const_iterator PI = FD->param_begin(), 
                                      PE = FD->param_end();
   StoreRef store = StoreRef(state->getStore(), *this);
@@ -2067,8 +2097,19 @@ StoreRef RegionStoreManager::enterStackFrame(ProgramStateRef state,
                    svalBuilder.makeLoc(MRMgr.getVarRegion(*PI, calleeCtx)),
                    ArgVal);
     }
-  } else if (const CXXConstructExpr *CE =
-               dyn_cast<CXXConstructExpr>(calleeCtx->getCallSite())) {
+
+    // For C++ method calls, also include the 'this' pointer.
+    if (const CXXMemberCallExpr *CME = dyn_cast<CXXMemberCallExpr>(CE)) {
+      loc::MemRegionVal This =
+        svalBuilder.getCXXThis(cast<CXXMethodDecl>(CME->getCalleeDecl()),
+                               calleeCtx);
+      SVal CalledObj = state->getSVal(CME->getImplicitObjectArgument(),
+                                      callerCtx);
+      store = Bind(store.getStore(), This, CalledObj);
+    }
+  }
+  else if (const CXXConstructExpr *CE =
+            dyn_cast<CXXConstructExpr>(calleeCtx->getCallSite())) {
     CXXConstructExpr::const_arg_iterator AI = CE->arg_begin(),
       AE = CE->arg_end();
 
@@ -2079,8 +2120,10 @@ StoreRef RegionStoreManager::enterStackFrame(ProgramStateRef state,
                    svalBuilder.makeLoc(MRMgr.getVarRegion(*PI, calleeCtx)),
                    ArgVal);
     }
-  } else
+  }
+  else {
     assert(isa<CXXDestructorDecl>(calleeCtx->getDecl()));
+  }
 
   return store;
 }

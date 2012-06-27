@@ -6,9 +6,10 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-//
-//  This file implements semantic analysis for C++ expressions.
-//
+///
+/// \file
+/// \brief Implements semantic analysis for C++ expressions.
+///
 //===----------------------------------------------------------------------===//
 
 #include "clang/Sema/SemaInternal.h"
@@ -375,8 +376,18 @@ Sema::ActOnCXXTypeid(SourceLocation OpLoc, SourceLocation LParenLoc,
     LookupResult R(*this, TypeInfoII, SourceLocation(), LookupTagName);
     LookupQualifiedName(R, getStdNamespace());
     CXXTypeInfoDecl = R.getAsSingle<RecordDecl>();
+    // Microsoft's typeinfo doesn't have type_info in std but in the global
+    // namespace if _HAS_EXCEPTIONS is defined to 0. See PR13153.
+    if (!CXXTypeInfoDecl && LangOpts.MicrosoftMode) {
+      LookupQualifiedName(R, Context.getTranslationUnitDecl());
+      CXXTypeInfoDecl = R.getAsSingle<RecordDecl>();
+    }
     if (!CXXTypeInfoDecl)
       return ExprError(Diag(OpLoc, diag::err_need_header_before_typeid));
+  }
+
+  if (!getLangOpts().RTTI) {
+    return ExprError(Diag(OpLoc, diag::err_no_typeid_with_fno_rtti));
   }
 
   QualType TypeInfoType = Context.getTypeDeclType(CXXTypeInfoDecl);
@@ -736,7 +747,7 @@ void Sema::CheckCXXThisCapture(SourceLocation Loc, bool Explicit) {
       FieldDecl *Field
         = FieldDecl::Create(Context, Lambda, Loc, Loc, 0, ThisTy,
                             Context.getTrivialTypeSourceInfo(ThisTy, Loc),
-                            0, false, false);
+                            0, false, ICIS_NoInit);
       Field->setImplicit(true);
       Field->setAccess(AS_private);
       Lambda->addDecl(Field);
@@ -930,7 +941,7 @@ static bool doesUsualArrayDeleteWantSize(Sema &S, SourceLocation loc,
 }
 
 /// \brief Parsed a C++ 'new' expression (C++ 5.3.4).
-
+///
 /// E.g.:
 /// @code new (memory) int[size][4] @endcode
 /// or
@@ -943,10 +954,8 @@ static bool doesUsualArrayDeleteWantSize(Sema &S, SourceLocation loc,
 /// \param PlacementRParen Closing paren of the placement arguments.
 /// \param TypeIdParens If the type is in parens, the source range.
 /// \param D The type to be allocated, as well as array dimensions.
-/// \param ConstructorLParen Opening paren of the constructor args, empty if
-///                          initializer-list syntax is used.
-/// \param ConstructorArgs Constructor/initialization arguments.
-/// \param ConstructorRParen Closing paren of the constructor args.
+/// \param Initializer The initializing expression or initializer-list, or null
+///   if there is none.
 ExprResult
 Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   SourceLocation PlacementLParen, MultiExprArg PlacementArgs,
@@ -958,7 +967,7 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
   // If the specified type is an array, unwrap it and save the expression.
   if (D.getNumTypeObjects() > 0 &&
       D.getTypeObject(0).Kind == DeclaratorChunk::Array) {
-    DeclaratorChunk &Chunk = D.getTypeObject(0);
+     DeclaratorChunk &Chunk = D.getTypeObject(0);
     if (TypeContainsAuto)
       return ExprError(Diag(Chunk.Loc, diag::err_new_array_of_auto)
         << D.getSourceRange());
@@ -4775,11 +4784,11 @@ ExprResult Sema::ActOnDecltypeExpression(Expr *E) {
     CXXDestructorDecl *Destructor = LookupDestructor(RD);
     Temp->setDestructor(Destructor);
 
-    MarkFunctionReferenced(E->getExprLoc(), Destructor);
-    CheckDestructorAccess(E->getExprLoc(), Destructor,
+    MarkFunctionReferenced(Bind->getExprLoc(), Destructor);
+    CheckDestructorAccess(Bind->getExprLoc(), Destructor,
                           PDiag(diag::err_access_dtor_temp)
-                            << E->getType());
-    DiagnoseUseOfDecl(Destructor, E->getExprLoc());
+                            << Bind->getType());
+    DiagnoseUseOfDecl(Destructor, Bind->getExprLoc());
 
     // We need a cleanup, but we don't need to remember the temporary.
     ExprNeedsCleanups = true;
@@ -5263,6 +5272,61 @@ ExprResult Sema::ActOnNoexceptExpr(SourceLocation KeyLoc, SourceLocation,
   return BuildCXXNoexceptExpr(KeyLoc, Operand, RParen);
 }
 
+static bool IsSpecialDiscardedValue(Expr *E) {
+  // In C++11, discarded-value expressions of a certain form are special,
+  // according to [expr]p10:
+  //   The lvalue-to-rvalue conversion (4.1) is applied only if the
+  //   expression is an lvalue of volatile-qualified type and it has
+  //   one of the following forms:
+  E = E->IgnoreParens();
+
+  //   - id-expression (5.1.1),
+  if (isa<DeclRefExpr>(E))
+    return true;
+
+  //   - subscripting (5.2.1),
+  if (isa<ArraySubscriptExpr>(E))
+    return true;
+
+  //   - class member access (5.2.5),
+  if (isa<MemberExpr>(E))
+    return true;
+
+  //   - indirection (5.3.1),
+  if (UnaryOperator *UO = dyn_cast<UnaryOperator>(E))
+    if (UO->getOpcode() == UO_Deref)
+      return true;
+
+  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+    //   - pointer-to-member operation (5.5),
+    if (BO->isPtrMemOp())
+      return true;
+
+    //   - comma expression (5.18) where the right operand is one of the above.
+    if (BO->getOpcode() == BO_Comma)
+      return IsSpecialDiscardedValue(BO->getRHS());
+  }
+
+  //   - conditional expression (5.16) where both the second and the third
+  //     operands are one of the above, or
+  if (ConditionalOperator *CO = dyn_cast<ConditionalOperator>(E))
+    return IsSpecialDiscardedValue(CO->getTrueExpr()) &&
+           IsSpecialDiscardedValue(CO->getFalseExpr());
+  // The related edge case of "*x ?: *x".
+  if (BinaryConditionalOperator *BCO =
+          dyn_cast<BinaryConditionalOperator>(E)) {
+    if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(BCO->getTrueExpr()))
+      return IsSpecialDiscardedValue(OVE->getSourceExpr()) &&
+             IsSpecialDiscardedValue(BCO->getFalseExpr());
+  }
+
+  // Objective-C++ extensions to the rule.
+  if (isa<PseudoObjectExpr>(E) || isa<ObjCIvarRefExpr>(E))
+    return true;
+
+  return false;
+}
+
 /// Perform the conversions required for an expression used in a
 /// context that ignores the result.
 ExprResult Sema::IgnoredValueConversions(Expr *E) {
@@ -5287,8 +5351,21 @@ ExprResult Sema::IgnoredValueConversions(Expr *E) {
     return Owned(E);
   }
 
-  // Otherwise, this rule does not apply in C++, at least not for the moment.
-  if (getLangOpts().CPlusPlus) return Owned(E);
+  if (getLangOpts().CPlusPlus)  {
+    // The C++11 standard defines the notion of a discarded-value expression;
+    // normally, we don't need to do anything to handle it, but if it is a
+    // volatile lvalue with a special form, we perform an lvalue-to-rvalue
+    // conversion.
+    if (getLangOpts().CPlusPlus0x && E->isGLValue() &&
+        E->getType().isVolatileQualified() &&
+        IsSpecialDiscardedValue(E)) {
+      ExprResult Res = DefaultLvalueConversion(E);
+      if (Res.isInvalid())
+        return Owned(E);
+      E = Res.take();
+    }
+    return Owned(E);
+  }
 
   // GCC seems to also exclude expressions of incomplete enum type.
   if (const EnumType *T = E->getType()->getAs<EnumType>()) {
@@ -5310,7 +5387,7 @@ ExprResult Sema::IgnoredValueConversions(Expr *E) {
   return Owned(E);
 }
 
-ExprResult Sema::ActOnFinishFullExpr(Expr *FE) {
+ExprResult Sema::ActOnFinishFullExpr(Expr *FE, SourceLocation CC) {
   ExprResult FullExpr = Owned(FE);
 
   if (!FullExpr.get())
@@ -5336,7 +5413,7 @@ ExprResult Sema::ActOnFinishFullExpr(Expr *FE) {
   if (FullExpr.isInvalid())
     return ExprError();
 
-  CheckImplicitConversions(FullExpr.get(), FullExpr.get()->getExprLoc());
+  CheckImplicitConversions(FullExpr.get(), CC);
   return MaybeCreateExprWithCleanups(FullExpr);
 }
 

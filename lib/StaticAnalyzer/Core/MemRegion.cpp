@@ -518,10 +518,6 @@ void StaticGlobalSpaceRegion::dumpToStream(raw_ostream &os) const {
   os << "StaticGlobalsMemSpace{" << CR << '}';
 }
 
-void NonStaticGlobalSpaceRegion::dumpToStream(raw_ostream &os) const {
-  os << "NonStaticGlobalSpaceRegion";
-}
-
 void GlobalInternalSpaceRegion::dumpToStream(raw_ostream &os) const {
   os << "GlobalInternalSpaceRegion";
 }
@@ -532,6 +528,22 @@ void GlobalSystemSpaceRegion::dumpToStream(raw_ostream &os) const {
 
 void GlobalImmutableSpaceRegion::dumpToStream(raw_ostream &os) const {
   os << "GlobalImmutableSpaceRegion";
+}
+
+void HeapSpaceRegion::dumpToStream(raw_ostream &os) const {
+  os << "HeapSpaceRegion";
+}
+
+void UnknownSpaceRegion::dumpToStream(raw_ostream &os) const {
+  os << "UnknownSpaceRegion";
+}
+
+void StackArgumentsSpaceRegion::dumpToStream(raw_ostream &os) const {
+  os << "StackArgumentsSpaceRegion";
+}
+
+void StackLocalsSpaceRegion::dumpToStream(raw_ostream &os) const {
+  os << "StackLocalsSpaceRegion";
 }
 
 void MemRegion::dumpPretty(raw_ostream &os) const {
@@ -643,6 +655,37 @@ MemRegionManager::getObjCStringRegion(const ObjCStringLiteral* Str){
   return getSubRegion<ObjCStringRegion>(Str, getGlobalsRegion());
 }
 
+/// Look through a chain of LocationContexts to either find the
+/// StackFrameContext that matches a DeclContext, or find a VarRegion
+/// for a variable captured by a block.
+static llvm::PointerUnion<const StackFrameContext *, const VarRegion *>
+getStackOrCaptureRegionForDeclContext(const LocationContext *LC,
+                                      const DeclContext *DC,
+                                      const VarDecl *VD) {
+  while (LC) {
+    if (const StackFrameContext *SFC = dyn_cast<StackFrameContext>(LC)) {
+      if (cast<DeclContext>(SFC->getDecl()) == DC)
+        return SFC;
+    }
+    if (const BlockInvocationContext *BC =
+        dyn_cast<BlockInvocationContext>(LC)) {
+      const BlockDataRegion *BR =
+        static_cast<const BlockDataRegion*>(BC->getContextData());
+      // FIXME: This can be made more efficient.
+      for (BlockDataRegion::referenced_vars_iterator
+           I = BR->referenced_vars_begin(),
+           E = BR->referenced_vars_end(); I != E; ++I) {
+        if (const VarRegion *VR = dyn_cast<VarRegion>(I.getOriginalRegion()))
+          if (VR->getDecl() == VD)
+            return cast<VarRegion>(I.getCapturedRegion());
+      }
+    }
+    
+    LC = LC->getParent();
+  }
+  return (const StackFrameContext*)0;
+}
+
 const VarRegion* MemRegionManager::getVarRegion(const VarDecl *D,
                                                 const LocationContext *LC) {
   const MemRegion *sReg = 0;
@@ -675,7 +718,13 @@ const VarRegion* MemRegionManager::getVarRegion(const VarDecl *D,
     // FIXME: Once we implement scope handling, we will need to properly lookup
     // 'D' to the proper LocationContext.
     const DeclContext *DC = D->getDeclContext();
-    const StackFrameContext *STC = LC->getStackFrameForDeclContext(DC);
+    llvm::PointerUnion<const StackFrameContext *, const VarRegion *> V =
+      getStackOrCaptureRegionForDeclContext(LC, DC, D);
+    
+    if (V.is<const VarRegion*>())
+      return V.get<const VarRegion*>();
+    
+    const StackFrameContext *STC = V.get<const StackFrameContext*>();
 
     if (!STC)
       sReg = getUnknownRegion();
@@ -798,6 +847,10 @@ MemRegionManager::getBlockTextRegion(const BlockDecl *BD, CanQualType locTy,
 /// getSymbolicRegion - Retrieve or create a "symbolic" memory region.
 const SymbolicRegion *MemRegionManager::getSymbolicRegion(SymbolRef sym) {
   return getSubRegion<SymbolicRegion>(sym, getUnknownRegion());
+}
+
+const SymbolicRegion *MemRegionManager::getSymbolicHeapRegion(SymbolRef Sym) {
+  return getSubRegion<SymbolicRegion>(Sym, getHeapRegion());
 }
 
 const FieldRegion*
@@ -1016,7 +1069,7 @@ RegionOffset MemRegion::getAsOffset() const {
       unsigned idx = 0;
       for (RecordDecl::field_iterator FI = RD->field_begin(), 
              FE = RD->field_end(); FI != FE; ++FI, ++idx)
-        if (FR->getDecl() == &*FI)
+        if (FR->getDecl() == *FI)
           break;
 
       const ASTRecordLayout &Layout = getContext().getASTRecordLayout(RD);

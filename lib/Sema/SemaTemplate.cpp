@@ -745,7 +745,7 @@ Decl *Sema::ActOnNonTypeTemplateParameter(Scope *S, Declarator &D,
 }
 
 /// ActOnTemplateTemplateParameter - Called when a C++ template template
-/// parameter (e.g. T in template <template <typename> class T> class array)
+/// parameter (e.g. T in template <template \<typename> class T> class array)
 /// has been parsed. S is the current scope.
 Decl *Sema::ActOnTemplateTemplateParameter(Scope* S,
                                            SourceLocation TmpLoc,
@@ -2438,6 +2438,43 @@ bool Sema::CheckTemplateTypeArgument(TemplateTypeParmDecl *Param,
 
     return true;
   }
+  case TemplateArgument::Expression: {
+    // We have a template type parameter but the template argument is an
+    // expression; see if maybe it is missing the "typename" keyword.
+    CXXScopeSpec SS;
+    DeclarationNameInfo NameInfo;
+
+    if (DeclRefExpr *ArgExpr = dyn_cast<DeclRefExpr>(Arg.getAsExpr())) {
+      SS.Adopt(ArgExpr->getQualifierLoc());
+      NameInfo = ArgExpr->getNameInfo();
+    } else if (DependentScopeDeclRefExpr *ArgExpr =
+               dyn_cast<DependentScopeDeclRefExpr>(Arg.getAsExpr())) {
+      SS.Adopt(ArgExpr->getQualifierLoc());
+      NameInfo = ArgExpr->getNameInfo();
+    } else if (CXXDependentScopeMemberExpr *ArgExpr =
+               dyn_cast<CXXDependentScopeMemberExpr>(Arg.getAsExpr())) {
+      if (ArgExpr->isImplicitAccess()) {
+        SS.Adopt(ArgExpr->getQualifierLoc());
+        NameInfo = ArgExpr->getMemberNameInfo();
+      }
+    }
+
+    if (NameInfo.getName().isIdentifier()) {
+      LookupResult Result(*this, NameInfo, LookupOrdinaryName);
+      LookupParsedName(Result, CurScope, &SS);
+
+      if (Result.getAsSingle<TypeDecl>() ||
+          Result.getResultKind() ==
+            LookupResult::NotFoundInCurrentInstantiation) {
+        // FIXME: Add a FixIt and fix up the template argument for recovery.
+        SourceLocation Loc = AL.getSourceRange().getBegin();
+        Diag(Loc, diag::err_template_arg_must_be_type_suggest);
+        Diag(Param->getLocation(), diag::note_template_param_here);
+        return true;
+      }
+    }
+    // fallthrough
+  }
   default: {
     // We have a template type parameter but the template argument
     // is not a type.
@@ -4086,7 +4123,8 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
         IntegerType = Enum->getDecl()->getIntegerType();
       Value = Value.extOrTrunc(Context.getTypeSize(IntegerType));
 
-      Converted = TemplateArgument(Value, Context.getCanonicalType(ParamType));
+      Converted = TemplateArgument(Context, Value,
+                                   Context.getCanonicalType(ParamType));
       return ArgResult;
     }
 
@@ -4212,7 +4250,7 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
       }
     }
 
-    Converted = TemplateArgument(Value,
+    Converted = TemplateArgument(Context, Value,
                                  ParamType->isEnumeralType() 
                                    ? Context.getCanonicalType(ParamType)
                                    : IntegerType);
@@ -4530,13 +4568,13 @@ Sema::BuildExpressionFromIntegralTemplateArgument(const TemplateArgument &Arg,
       Kind = CharacterLiteral::Ascii;
 
     return Owned(new (Context) CharacterLiteral(
-                                            Arg.getAsIntegral()->getZExtValue(),
+                                            Arg.getAsIntegral().getZExtValue(),
                                             Kind, T, Loc));
   }
 
   if (T->isBooleanType())
     return Owned(new (Context) CXXBoolLiteralExpr(
-                                            Arg.getAsIntegral()->getBoolValue(),
+                                            Arg.getAsIntegral().getBoolValue(),
                                             T, Loc));
 
   if (T->isNullPtrType())
@@ -4551,7 +4589,7 @@ Sema::BuildExpressionFromIntegralTemplateArgument(const TemplateArgument &Arg,
   else
     BT = T;
 
-  Expr *E = IntegerLiteral::Create(Context, *Arg.getAsIntegral(), BT, Loc);
+  Expr *E = IntegerLiteral::Create(Context, Arg.getAsIntegral(), BT, Loc);
   if (T->isEnumeralType()) {
     // FIXME: This is a hack. We need a better way to handle substituted
     // non-type template parameters.
@@ -5074,7 +5112,7 @@ static bool CheckNonTypeClassTemplatePartialSpecializationArgs(Sema &S,
 /// \param TemplateParams the template parameters of the primary class
 /// template.
 ///
-/// \param TemplateArg the template arguments of the class template
+/// \param TemplateArgs the template arguments of the class template
 /// partial specialization.
 ///
 /// \returns true if there was an error, false otherwise.
@@ -5752,14 +5790,17 @@ Sema::CheckSpecializationInstantiationRedecl(SourceLocation NewLoc,
 }
 
 /// \brief Perform semantic analysis for the given dependent function
-/// template specialization.  The only possible way to get a dependent
-/// function template specialization is with a friend declaration,
-/// like so:
+/// template specialization.
 ///
-///   template <class T> void foo(T);
-///   template <class T> class A {
+/// The only possible way to get a dependent function template specialization
+/// is with a friend declaration, like so:
+///
+/// \code
+///   template \<class T> void foo(T);
+///   template \<class T> class A {
 ///     friend void foo<>(T);
 ///   };
+/// \endcode
 ///
 /// There really isn't any useful analysis we can do here, so we
 /// just store the information.

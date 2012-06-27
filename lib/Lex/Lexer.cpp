@@ -127,7 +127,7 @@ Lexer::Lexer(FileID FID, const llvm::MemoryBuffer *InputFile, Preprocessor &PP)
 }
 
 /// Lexer constructor - Create a new raw lexer object.  This object is only
-/// suitable for calls to 'LexRawToken'.  This lexer assumes that the text
+/// suitable for calls to 'LexFromRawLexer'.  This lexer assumes that the text
 /// range will outlive it, so it doesn't take ownership of it.
 Lexer::Lexer(SourceLocation fileloc, const LangOptions &langOpts,
              const char *BufStart, const char *BufPtr, const char *BufEnd)
@@ -140,7 +140,7 @@ Lexer::Lexer(SourceLocation fileloc, const LangOptions &langOpts,
 }
 
 /// Lexer constructor - Create a new raw lexer object.  This object is only
-/// suitable for calls to 'LexRawToken'.  This lexer assumes that the text
+/// suitable for calls to 'LexFromRawLexer'.  This lexer assumes that the text
 /// range will outlive it, so it doesn't take ownership of it.
 Lexer::Lexer(FileID FID, const llvm::MemoryBuffer *FromFile,
              const SourceManager &SM, const LangOptions &langOpts)
@@ -820,10 +820,6 @@ static CharSourceRange makeRangeFromFileLocs(CharSourceRange Range,
   return CharSourceRange::getCharRange(Begin, End);
 }
 
-/// \brief Accepts a range and returns a character range with file locations.
-///
-/// Returns a null range if a part of the range resides inside a macro
-/// expansion or the range does not reside on the same FileID.
 CharSourceRange Lexer::makeFileCharRange(CharSourceRange Range,
                                          const SourceManager &SM,
                                          const LangOptions &LangOpts) {
@@ -1091,20 +1087,21 @@ static inline bool isIdentifierBody(unsigned char c) {
 }
 
 /// isHorizontalWhitespace - Return true if this character is horizontal
-/// whitespace: ' ', '\t', '\f', '\v'.  Note that this returns false for '\0'.
+/// whitespace: ' ', '\\t', '\\f', '\\v'.  Note that this returns false for
+/// '\\0'.
 static inline bool isHorizontalWhitespace(unsigned char c) {
   return (CharInfo[c] & CHAR_HORZ_WS) ? true : false;
 }
 
 /// isVerticalWhitespace - Return true if this character is vertical
-/// whitespace: '\n', '\r'.  Note that this returns false for '\0'.
+/// whitespace: '\\n', '\\r'.  Note that this returns false for '\\0'.
 static inline bool isVerticalWhitespace(unsigned char c) {
   return (CharInfo[c] & CHAR_VERT_WS) ? true : false;
 }
 
 /// isWhitespace - Return true if this character is horizontal or vertical
-/// whitespace: ' ', '\t', '\f', '\v', '\n', '\r'.  Note that this returns false
-/// for '\0'.
+/// whitespace: ' ', '\\t', '\\f', '\\v', '\\n', '\\r'.  Note that this returns
+/// false for '\\0'.
 static inline bool isWhitespace(unsigned char c) {
   return (CharInfo[c] & (CHAR_HORZ_WS|CHAR_VERT_WS)) ? true : false;
 }
@@ -1122,6 +1119,11 @@ static inline bool isRawStringDelimBody(unsigned char c) {
   return (CharInfo[c] &
           (CHAR_LETTER|CHAR_NUMBER|CHAR_UNDER|CHAR_PERIOD|CHAR_RAWDEL)) ?
     true : false;
+}
+
+// Allow external clients to make use of CharInfo.
+bool Lexer::isIdentifierBodyChar(char c, const LangOptions &LangOpts) {
+  return isIdentifierBody(c) || (c == '$' && LangOpts.DollarIdents);
 }
 
 
@@ -1564,8 +1566,20 @@ void Lexer::LexNumericConstant(Token &Result, const char *CurPtr) {
   }
 
   // If we have a hex FP constant, continue.
-  if ((C == '-' || C == '+') && (PrevCh == 'P' || PrevCh == 'p'))
-    return LexNumericConstant(Result, ConsumeChar(CurPtr, Size, Result));
+  if ((C == '-' || C == '+') && (PrevCh == 'P' || PrevCh == 'p')) {
+    // Outside C99, we accept hexadecimal floating point numbers as a
+    // not-quite-conforming extension. Only do so if this looks like it's
+    // actually meant to be a hexfloat, and not if it has a ud-suffix.
+    bool IsHexFloat = true;
+    if (!LangOpts.C99) {
+      if (!isHexaLiteral(BufferPtr, LangOpts))
+        IsHexFloat = false;
+      else if (std::find(BufferPtr, CurPtr, '_') != CurPtr)
+        IsHexFloat = false;
+    }
+    if (IsHexFloat)
+      return LexNumericConstant(Result, ConsumeChar(CurPtr, Size, Result));
+  }
 
   // Update the location of token as well as BufferPtr.
   const char *TokStart = BufferPtr;
@@ -2022,7 +2036,7 @@ bool Lexer::SaveBCPLComment(Token &Result, const char *CurPtr) {
   // directly.
   FormTokenWithChars(Result, CurPtr, tok::comment);
 
-  if (!ParsingPreprocessorDirective)
+  if (!ParsingPreprocessorDirective || LexingRawMode)
     return true;
 
   // If this BCPL-style comment is in a macro definition, transmogrify it into
@@ -2043,8 +2057,8 @@ bool Lexer::SaveBCPLComment(Token &Result, const char *CurPtr) {
 }
 
 /// isBlockCommentEndOfEscapedNewLine - Return true if the specified newline
-/// character (either \n or \r) is part of an escaped newline sequence.  Issue a
-/// diagnostic if so.  We know that the newline is inside of a block comment.
+/// character (either \\n or \\r) is part of an escaped newline sequence.  Issue
+/// a diagnostic if so.  We know that the newline is inside of a block comment.
 static bool isEndOfBlockCommentWithEscapedNewLine(const char *CurPtr,
                                                   Lexer *L) {
   assert(CurPtr[0] == '\n' || CurPtr[0] == '\r');
@@ -2110,12 +2124,12 @@ static bool isEndOfBlockCommentWithEscapedNewLine(const char *CurPtr,
 #undef bool
 #endif
 
-/// SkipBlockComment - We have just read the /* characters from input.  Read
-/// until we find the */ characters that terminate the comment.  Note that we
-/// don't bother decoding trigraphs or escaped newlines in block comments,
-/// because they cannot cause the comment to end.  The only thing that can
-/// happen is the comment could end with an escaped newline between the */ end
-/// of comment.
+/// We have just read from input the / and * characters that started a comment.
+/// Read until we find the * and / characters that terminate the comment.
+/// Note that we don't bother decoding trigraphs or escaped newlines in block
+/// comments, because they cannot cause the comment to end.  The only thing
+/// that can happen is the comment could end with an escaped newline between
+/// the terminating * and /.
 ///
 /// If we're in KeepCommentMode or any CommentHandler has inserted
 /// some tokens, this will store the first token and return true.
@@ -2286,10 +2300,9 @@ bool Lexer::SkipBlockComment(Token &Result, const char *CurPtr) {
 
 /// ReadToEndOfLine - Read the rest of the current preprocessor line as an
 /// uninterpreted string.  This switches the lexer out of directive mode.
-std::string Lexer::ReadToEndOfLine() {
+void Lexer::ReadToEndOfLine(SmallVectorImpl<char> *Result) {
   assert(ParsingPreprocessorDirective && ParsingFilename == false &&
          "Must be in a preprocessing directive!");
-  std::string Result;
   Token Tmp;
 
   // CurPtr - Cache BufferPtr in an automatic variable.
@@ -2298,7 +2311,8 @@ std::string Lexer::ReadToEndOfLine() {
     char Char = getAndAdvanceChar(CurPtr, Tmp);
     switch (Char) {
     default:
-      Result += Char;
+      if (Result)
+        Result->push_back(Char);
       break;
     case 0:  // Null.
       // Found end of file?
@@ -2306,11 +2320,12 @@ std::string Lexer::ReadToEndOfLine() {
         if (isCodeCompletionPoint(CurPtr-1)) {
           PP->CodeCompleteNaturalLanguage();
           cutOffLexing();
-          return Result;
+          return;
         }
 
         // Nope, normal character, continue.
-        Result += Char;
+        if (Result)
+          Result->push_back(Char);
         break;
       }
       // FALL THROUGH.
@@ -2329,8 +2344,8 @@ std::string Lexer::ReadToEndOfLine() {
       }
       assert(Tmp.is(tok::eod) && "Unexpected token!");
 
-      // Finally, we're done, return the string we found.
-      return Result;
+      // Finally, we're done;
+      return;
     }
   }
 }
@@ -2383,7 +2398,7 @@ bool Lexer::LexEndOfFile(Token &Result, const char *CurPtr) {
   BufferPtr = CurPtr;
 
   // Finally, let the preprocessor handle this.
-  return PP->HandleEndOfFile(Result);
+  return PP->HandleEndOfFile(Result, isPragmaLexer());
 }
 
 /// isNextPPTokenLParen - Return 1 if the next unexpanded token lexed from
@@ -2418,7 +2433,7 @@ unsigned Lexer::isNextPPTokenLParen() {
   return Tok.is(tok::l_paren);
 }
 
-/// FindConflictEnd - Find the end of a version control conflict marker.
+/// \brief Find the end of a version control conflict marker.
 static const char *FindConflictEnd(const char *CurPtr, const char *BufferEnd,
                                    ConflictMarkerKind CMK) {
   const char *Terminator = CMK == CMK_Perforce ? "<<<<\n" : ">>>>>>>";
@@ -2625,7 +2640,8 @@ LexNextToken:
       ParsingPreprocessorDirective = false;
 
       // Restore comment saving mode, in case it was disabled for directive.
-      SetCommentRetentionState(PP->getCommentRetentionState());
+      if (PP)
+        SetCommentRetentionState(PP->getCommentRetentionState());
 
       // Since we consumed a newline, we are back at the start of a line.
       IsAtStartOfLine = true;

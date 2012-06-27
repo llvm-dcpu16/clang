@@ -7,6 +7,9 @@
 <link type="text/css" rel="stylesheet" href="../content.css">
 </head>
 <body>
+
+<!--#include virtual="../menu.html.incl"-->
+
 <div id="content">
 
 <h1>LibTooling</h1>
@@ -175,6 +178,30 @@ as first argument and some source files as further positional arguments:
   $ export BD=/path/to/build/llvm
   $ $BD/bin/clang-check $BD tools/clang/tools/clang-check/ClangCheck.cpp
 </pre>
+</p>
+
+<h3 id="linking">Linking.</h3>
+<p>Please note that this presents the linking requirements at the time of this
+writing. For the most up-to-date information, look at one of the tools'
+Makefiles (for example
+<a href="http://llvm.org/viewvc/llvm-project/cfe/trunk/tools/clang-check/Makefile?view=markup">clang-check/Makefile</a>).
+</p>
+
+<p>To link a binary using the tooling infrastructure, link in the following
+libraries:
+<ul>
+<li>Tooling</li>
+<li>Frontend</li>
+<li>Driver</li>
+<li>Serialization</li>
+<li>Parse</li>
+<li>Sema</li>
+<li>Analysis</li>
+<li>Edit</li>
+<li>AST</li>
+<li>Lex</li>
+<li>Basic</li>
+</ul>
 </p>
 
 </div>

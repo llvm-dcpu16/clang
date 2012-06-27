@@ -48,14 +48,12 @@ def err_fe_unable_to_interface_with_target : Error<
     "unable to interface with target machine">;
 def err_fe_unable_to_open_output : Error<
     "unable to open output file '%0': '%1'">;
-def err_fe_unable_to_rename_temp : Error<
-    "unable to rename temporary '%0' to output file '%1': '%2'">;
 def err_fe_unable_to_open_logfile : Error<
     "unable to open logfile file '%0': '%1'">;
 def err_fe_pth_file_has_no_source_header : Error<
     "PTH file '%0' does not designate an original source header file for -include-pth">;
 def warn_fe_macro_contains_embedded_newline : Warning<
-    "macro '%0' contains embedded newline, text after the newline is ignored.">;
+    "macro '%0' contains embedded newline; text after the newline is ignored">;
 def warn_fe_cc_print_header_failure : Warning<
     "unable to open CC_PRINT_HEADERS file: %0 (using stderr)">;
 def warn_fe_cc_log_diagnostics_failure : Warning<
@@ -93,14 +91,14 @@ def warn_unknown_warning_option : Warning<
     "unknown warning option '%0'">,
     InGroup<DiagGroup<"unknown-warning-option"> >;
 def warn_unknown_negative_warning_option : Warning<
-    "unknown warning option '%0'?">,
-    InGroup<DiagGroup<"unknown-warning-option"> >, DefaultIgnore;
+    "unknown warning option '%0'">,
+    InGroup<DiagGroup<"unknown-warning-option"> >;
 def warn_unknown_warning_option_suggest : Warning<
     "unknown warning option '%0'; did you mean '%1'?">,
     InGroup<DiagGroup<"unknown-warning-option"> >;
 def warn_unknown_negative_warning_option_suggest : Warning<
     "unknown warning option '%0'; did you mean '%1'?">,
-    InGroup<DiagGroup<"unknown-warning-option"> >, DefaultIgnore;
+    InGroup<DiagGroup<"unknown-warning-option"> >;
 def warn_unknown_warning_specifier : Warning<
     "unknown %0 warning specifier: '%1'">,
     InGroup<DiagGroup<"unknown-warning-option"> >;

@@ -451,7 +451,8 @@ void ObjCMethodDecl::setMethodParams(ASTContext &C,
   if (isImplicit())
     return setParamsAndSelLocs(C, Params, ArrayRef<SourceLocation>());
 
-  SelLocsKind = hasStandardSelectorLocs(getSelector(), SelLocs, Params, EndLoc);
+  SelLocsKind = hasStandardSelectorLocs(getSelector(), SelLocs, Params,
+                                        DeclEndLoc);
   if (SelLocsKind != SelLoc_NonStandard)
     return setParamsAndSelLocs(C, Params, ArrayRef<SourceLocation>());
 
@@ -521,6 +522,12 @@ ObjCMethodDecl *ObjCMethodDecl::getCanonicalDecl() {
                                                     isInstanceMethod());
 
   return this;
+}
+
+SourceLocation ObjCMethodDecl::getLocEnd() const {
+  if (Stmt *Body = getBody())
+    return Body->getLocEnd();
+  return DeclEndLoc;
 }
 
 ObjCMethodFamily ObjCMethodDecl::getMethodFamily() const {
@@ -767,9 +774,9 @@ ObjCIvarDecl *ObjCInterfaceDecl::all_declared_ivar_begin() {
   ObjCIvarDecl *curIvar = 0;
   if (!ivar_empty()) {
     ObjCInterfaceDecl::ivar_iterator I = ivar_begin(), E = ivar_end();
-    data().IvarList = &*I; ++I;
-    for (curIvar = data().IvarList; I != E; curIvar = &*I, ++I)
-      curIvar->setNextIvar(&*I);
+    data().IvarList = *I; ++I;
+    for (curIvar = data().IvarList; I != E; curIvar = *I, ++I)
+      curIvar->setNextIvar(*I);
   }
   
   for (const ObjCCategoryDecl *CDecl = getFirstClassExtension(); CDecl;
@@ -778,11 +785,11 @@ ObjCIvarDecl *ObjCInterfaceDecl::all_declared_ivar_begin() {
       ObjCCategoryDecl::ivar_iterator I = CDecl->ivar_begin(),
                                           E = CDecl->ivar_end();
       if (!data().IvarList) {
-        data().IvarList = &*I; ++I;
+        data().IvarList = *I; ++I;
         curIvar = data().IvarList;
       }
-      for ( ;I != E; curIvar = &*I, ++I)
-        curIvar->setNextIvar(&*I);
+      for ( ;I != E; curIvar = *I, ++I)
+        curIvar->setNextIvar(*I);
     }
   }
   
@@ -791,11 +798,11 @@ ObjCIvarDecl *ObjCInterfaceDecl::all_declared_ivar_begin() {
       ObjCImplementationDecl::ivar_iterator I = ImplDecl->ivar_begin(),
                                             E = ImplDecl->ivar_end();
       if (!data().IvarList) {
-        data().IvarList = &*I; ++I;
+        data().IvarList = *I; ++I;
         curIvar = data().IvarList;
       }
-      for ( ;I != E; curIvar = &*I, ++I)
-        curIvar->setNextIvar(&*I);
+      for ( ;I != E; curIvar = *I, ++I)
+        curIvar->setNextIvar(*I);
     }
   }
   return data().IvarList;
@@ -1169,13 +1176,13 @@ void ObjCImplDecl::setClassInterface(ObjCInterfaceDecl *IFace) {
 }
 
 /// FindPropertyImplIvarDecl - This method lookup the ivar in the list of
-/// properties implemented in this category @implementation block and returns
+/// properties implemented in this category \@implementation block and returns
 /// the implemented property that uses it.
 ///
 ObjCPropertyImplDecl *ObjCImplDecl::
 FindPropertyImplIvarDecl(IdentifierInfo *ivarId) const {
   for (propimpl_iterator i = propimpl_begin(), e = propimpl_end(); i != e; ++i){
-    ObjCPropertyImplDecl *PID = &*i;
+    ObjCPropertyImplDecl *PID = *i;
     if (PID->getPropertyIvarDecl() &&
         PID->getPropertyIvarDecl()->getIdentifier() == ivarId)
       return PID;
@@ -1184,13 +1191,13 @@ FindPropertyImplIvarDecl(IdentifierInfo *ivarId) const {
 }
 
 /// FindPropertyImplDecl - This method looks up a previous ObjCPropertyImplDecl
-/// added to the list of those properties @synthesized/@dynamic in this
-/// category @implementation block.
+/// added to the list of those properties \@synthesized/\@dynamic in this
+/// category \@implementation block.
 ///
 ObjCPropertyImplDecl *ObjCImplDecl::
 FindPropertyImplDecl(IdentifierInfo *Id) const {
   for (propimpl_iterator i = propimpl_begin(), e = propimpl_end(); i != e; ++i){
-    ObjCPropertyImplDecl *PID = &*i;
+    ObjCPropertyImplDecl *PID = *i;
     if (PID->getPropertyDecl()->getIdentifier() == Id)
       return PID;
   }

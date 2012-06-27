@@ -230,7 +230,7 @@ public:
 
   /// \brief Build the call graph for all the top level decls of this TU and
   /// use it to define the order in which the functions should be visited.
-  void HandleDeclsGallGraph();
+  void HandleDeclsGallGraph(const unsigned LocalTUDeclsSize);
 
   /// \brief Run analyzes(syntax or path sensitive) on the given function.
   /// \param Mode - determines if we are requesting syntax only or path
@@ -246,6 +246,7 @@ public:
                         SetOfConstDecls *VisitedCallees);
 
   /// Visitors for the RecursiveASTVisitor.
+  bool shouldWalkTypesOfTypeLocs() const { return false; }
 
   /// Handle callbacks for arbitrary Decls.
   bool VisitDecl(Decl *D) {
@@ -310,14 +311,18 @@ void AnalysisConsumer::storeTopLevelDecls(DeclGroupRef DG) {
   }
 }
 
-void AnalysisConsumer::HandleDeclsGallGraph() {
+void AnalysisConsumer::HandleDeclsGallGraph(const unsigned LocalTUDeclsSize) {
   // Otherwise, use the Callgraph to derive the order.
   // Build the Call Graph.
   CallGraph CG;
+
   // Add all the top level declarations to the graph.
-  for (SetOfDecls::iterator I = LocalTUDecls.begin(),
-                            E = LocalTUDecls.end(); I != E; ++I)
-    CG.addToCallGraph(*I);
+  // Note: CallGraph can trigger deserialization of more items from a pch
+  // (though HandleInterestingDecl); triggering additions to LocalTUDecls.
+  // We rely on random access to add the initially processed Decls to CG.
+  for (unsigned i = 0 ; i < LocalTUDeclsSize ; ++i) {
+    CG.addToCallGraph(LocalTUDecls[i]);
+  }
 
   // Find the top level nodes - children of root + the unreachable (parentless)
   // nodes.
@@ -407,13 +412,13 @@ void AnalysisConsumer::HandleTranslationUnit(ASTContext &C) {
     // entries.  Thus we don't use an iterator, but rely on LocalTUDecls
     // random access.  By doing so, we automatically compensate for iterators
     // possibly being invalidated, although this is a bit slower.
-    const unsigned n = LocalTUDecls.size();
-    for (unsigned i = 0 ; i < n ; ++i) {
+    const unsigned LocalTUDeclsSize = LocalTUDecls.size();
+    for (unsigned i = 0 ; i < LocalTUDeclsSize ; ++i) {
       TraverseDecl(LocalTUDecls[i]);
     }
 
     if (Mgr->shouldInlineCall())
-      HandleDeclsGallGraph();
+      HandleDeclsGallGraph(LocalTUDeclsSize);
 
     // After all decls handled, run checkers on the entire TranslationUnit.
     checkerMgr->runCheckersOnEndOfTranslationUnit(TU, *Mgr, BR);

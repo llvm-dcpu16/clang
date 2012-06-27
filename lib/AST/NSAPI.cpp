@@ -9,11 +9,13 @@
 
 #include "clang/AST/NSAPI.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Expr.h"
 
 using namespace clang;
 
 NSAPI::NSAPI(ASTContext &ctx)
-  : Ctx(ctx), ClassIds(), BOOLId(0), NSIntegerId(0), NSUIntegerId(0) {
+  : Ctx(ctx), ClassIds(), BOOLId(0), NSIntegerId(0), NSUIntegerId(0),
+    NSASCIIStringEncodingId(0), NSUTF8StringEncodingId(0) {
 }
 
 IdentifierInfo *NSAPI::getNSClassId(NSClassIdKindKind K) const {
@@ -40,6 +42,21 @@ Selector NSAPI::getNSStringSelector(NSStringMethodKind MK) const {
     case NSStr_stringWithString:
       Sel = Ctx.Selectors.getUnarySelector(&Ctx.Idents.get("stringWithString"));
       break;
+    case NSStr_stringWithUTF8String:
+      Sel = Ctx.Selectors.getUnarySelector(
+                                       &Ctx.Idents.get("stringWithUTF8String"));
+      break;
+    case NSStr_stringWithCStringEncoding: {
+      IdentifierInfo *KeyIdents[] = {
+        &Ctx.Idents.get("stringWithCString"),
+        &Ctx.Idents.get("encoding")
+      };
+      Sel = Ctx.Selectors.getSelector(2, KeyIdents);
+      break;
+    }
+    case NSStr_stringWithCString:
+      Sel= Ctx.Selectors.getUnarySelector(&Ctx.Idents.get("stringWithCString"));
+      break;
     case NSStr_initWithString:
       Sel = Ctx.Selectors.getUnarySelector(&Ctx.Idents.get("initWithString"));
       break;
@@ -48,6 +65,17 @@ Selector NSAPI::getNSStringSelector(NSStringMethodKind MK) const {
   }
 
   return NSStringSelectors[MK];
+}
+
+llvm::Optional<NSAPI::NSStringMethodKind>
+NSAPI::getNSStringMethodKind(Selector Sel) const {
+  for (unsigned i = 0; i != NumNSStringMethods; ++i) {
+    NSStringMethodKind MK = NSStringMethodKind(i);
+    if (Sel == getNSStringSelector(MK))
+      return MK;
+  }
+
+  return llvm::Optional<NSStringMethodKind>();
 }
 
 Selector NSAPI::getNSArraySelector(NSArrayMethodKind MK) const {
@@ -352,4 +380,34 @@ bool NSAPI::isObjCTypedef(QualType T,
   }
 
   return false;
+}
+
+bool NSAPI::isObjCEnumerator(const Expr *E,
+                             StringRef name, IdentifierInfo *&II) const {
+  if (!Ctx.getLangOpts().ObjC1)
+    return false;
+  if (!E)
+    return false;
+
+  if (!II)
+    II = &Ctx.Idents.get(name);
+
+  if (const DeclRefExpr *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts()))
+    if (const EnumConstantDecl *
+          EnumD = dyn_cast_or_null<EnumConstantDecl>(DRE->getDecl()))
+      return EnumD->getIdentifier() == II;
+
+  return false;
+}
+
+Selector NSAPI::getOrInitSelector(ArrayRef<StringRef> Ids,
+                                  Selector &Sel) const {
+  if (Sel.isNull()) {
+    SmallVector<IdentifierInfo *, 4> Idents;
+    for (ArrayRef<StringRef>::const_iterator
+           I = Ids.begin(), E = Ids.end(); I != E; ++I)
+      Idents.push_back(&Ctx.Idents.get(*I));
+    Sel = Ctx.Selectors.getSelector(Idents.size(), Idents.data());
+  }
+  return Sel;
 }

@@ -192,20 +192,11 @@ macro(add_clang_library name)
     add_dependencies( ${name} ${LLVM_COMMON_DEPENDS} )
   endif( LLVM_COMMON_DEPENDS )
 
-  target_link_libraries( ${name} ${LLVM_USED_LIBS} )
   llvm_config( ${name} ${LLVM_LINK_COMPONENTS} )
   target_link_libraries( ${name} ${LLVM_COMMON_LIBS} )
   link_system_libs( ${name} )
 
   add_dependencies(${name} ClangDiagnosticCommon)
-  if(MSVC)
-    get_target_property(cflag ${name} COMPILE_FLAGS)
-    if(NOT cflag)
-      set(cflag "")
-    endif(NOT cflag)
-    set(cflag "${cflag} /Za")
-    set_target_properties(${name} PROPERTIES COMPILE_FLAGS ${cflag})
-  endif(MSVC)
   install(TARGETS ${name}
     LIBRARY DESTINATION lib${LLVM_LIBDIR_SUFFIX}
     ARCHIVE DESTINATION lib${LLVM_LIBDIR_SUFFIX}

@@ -1198,7 +1198,7 @@ private:
   llvm::BasicBlock *TrapBB;
 
 public:
-  CodeGenFunction(CodeGenModule &cgm);
+  CodeGenFunction(CodeGenModule &cgm, bool suppressNewContext=false);
   ~CodeGenFunction();
 
   CodeGenTypes &getTypes() const { return CGM.getTypes(); }
@@ -1310,6 +1310,7 @@ public:
                           const ObjCPropertyImplDecl *PID);
   void generateObjCGetterBody(const ObjCImplementationDecl *classImpl,
                               const ObjCPropertyImplDecl *propImpl,
+                              const ObjCMethodDecl *GetterMothodDecl,
                               llvm::Constant *AtomicHelperFn);
 
   void GenerateObjCCtorDtorMethod(ObjCImplementationDecl *IMP,
@@ -1969,6 +1970,7 @@ public:
   void EmitCaseStmt(const CaseStmt &S);
   void EmitCaseStmtRange(const CaseStmt &S);
   void EmitAsmStmt(const AsmStmt &S);
+  void EmitMSAsmStmt(const MSAsmStmt &S);
 
   void EmitObjCForCollectionStmt(const ObjCForCollectionStmt &S);
   void EmitObjCAtTryStmt(const ObjCAtTryStmt &S);
@@ -2104,6 +2106,7 @@ public:
   LValue EmitMemberExpr(const MemberExpr *E);
   LValue EmitObjCIsaExpr(const ObjCIsaExpr *E);
   LValue EmitCompoundLiteralLValue(const CompoundLiteralExpr *E);
+  LValue EmitInitListLValue(const InitListExpr *E);
   LValue EmitConditionalOperatorLValue(const AbstractConditionalOperator *E);
   LValue EmitCastLValue(const CastExpr *E);
   LValue EmitNullInitializationLValue(const CXXScalarValueInitExpr *E);

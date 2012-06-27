@@ -59,7 +59,7 @@ Driver::Driver(StringRef ClangExecutable,
     CCPrintOptions(false), CCPrintHeaders(false), CCLogDiagnostics(false),
     CCGenDiagnostics(false), CCCGenericGCCName(""), CheckInputsExist(true),
     CCCUseClang(true), CCCUseClangCXX(true), CCCUseClangCPP(true),
-    CCCUsePCH(true), SuppressMissingInputWarning(false) {
+    ForcedClangUse(false), CCCUsePCH(true), SuppressMissingInputWarning(false) {
   if (IsProduction) {
     // In a "production" build, only use clang on architectures we expect to
     // work.
@@ -382,9 +382,12 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
   if (FailingCommand && FailingCommand->getCreator().isLinkJob())
     return;
 
+  // Print the version of the compiler.
+  PrintVersion(C, llvm::errs());
+
   Diag(clang::diag::note_drv_command_failed_diag_msg)
-    << "Please submit a bug report to " BUG_REPORT_URL " and include command"
-    " line arguments and all diagnostic information.";
+    << "PLEASE submit a bug report to " BUG_REPORT_URL " and include the "
+    "crash backtrace, preprocessed source, and associated run script.";
 
   // Suppress driver output and emit preprocessor output to temp file.
   CCCIsCPP = true;
@@ -478,7 +481,9 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
   // If the command succeeded, we are done.
   if (Res == 0) {
     Diag(clang::diag::note_drv_command_failed_diag_msg)
-      << "Preprocessed source(s) and associated run script(s) are located at:";
+      << "\n********************\n\n"
+      "PLEASE ATTACH THE FOLLOWING FILES TO THE BUG REPORT:\n"
+      "Preprocessed source(s) and associated run script(s) are located at:";
     ArgStringList Files = C.getTempFiles();
     for (ArgStringList::const_iterator it = Files.begin(), ie = Files.end();
          it != ie; ++it) {
@@ -515,7 +520,7 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
           do {
             I = Cmd.find(Flag[i], I);
             if (I == std::string::npos) break;
-            
+
             E = Cmd.find(" ", I + Flag[i].length());
             if (E == std::string::npos) break;
             Cmd.erase(I, E - I + 1);
@@ -538,6 +543,8 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
         Diag(clang::diag::note_drv_command_failed_diag_msg) << Script;
       }
     }
+    Diag(clang::diag::note_drv_command_failed_diag_msg)
+      << "\n\n********************";
   } else {
     // Failure, remove preprocessed files.
     if (!C.getArgs().hasArg(options::OPT_save_temps))
@@ -1635,7 +1642,7 @@ std::string Driver::GetTemporaryPath(StringRef Prefix, const char *Suffix)
   llvm::sys::Path P(TmpDir);
   P.appendComponent(Prefix);
   if (P.makeUnique(false, &Error)) {
-    Diag(clang::diag::err_drv_unable_to_make_temp) << Error;
+    Diag(clang::diag::err_unable_to_make_temp) << Error;
     return "";
   }
 

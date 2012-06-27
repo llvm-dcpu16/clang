@@ -249,6 +249,11 @@ void ASTStmtWriter::VisitAsmStmt(AsmStmt *S) {
   Code = serialization::STMT_ASM;
 }
 
+void ASTStmtWriter::VisitMSAsmStmt(MSAsmStmt *S) {
+  // FIXME: Statement writer not yet implemented for MS style inline asm.
+  VisitStmt(S);
+}
+
 void ASTStmtWriter::VisitExpr(Expr *E) {
   VisitStmt(E);
   Writer.AddTypeRef(E->getType(), Record);
@@ -837,6 +842,7 @@ void ASTStmtWriter::VisitObjCProtocolExpr(ObjCProtocolExpr *E) {
   VisitExpr(E);
   Writer.AddDeclRef(E->getProtocol(), Record);
   Writer.AddSourceLocation(E->getAtLoc(), Record);
+  Writer.AddSourceLocation(E->ProtoLoc, Record);
   Writer.AddSourceLocation(E->getRParenLoc(), Record);
   Code = serialization::EXPR_OBJC_PROTOCOL_EXPR;
 }

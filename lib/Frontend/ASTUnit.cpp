@@ -17,12 +17,6 @@
 #include "clang/AST/DeclVisitor.h"
 #include "clang/AST/TypeOrdering.h"
 #include "clang/AST/StmtVisitor.h"
-#include "clang/Driver/Compilation.h"
-#include "clang/Driver/Driver.h"
-#include "clang/Driver/Job.h"
-#include "clang/Driver/ArgList.h"
-#include "clang/Driver/Options.h"
-#include "clang/Driver/Tool.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
@@ -1139,7 +1133,8 @@ bool ASTUnit::Parse(llvm::MemoryBuffer *OverrideMainBuffer) {
                                StoredDiagnostics);
   }
 
-  Act->Execute();
+  if (!Act->Execute())
+    goto error;
 
   transferASTDataFromCompilerInstance(*Clang);
   
@@ -1801,7 +1796,13 @@ ASTUnit *ASTUnit::LoadFromCompilerInvocationAction(CompilerInvocation *CI,
                                            AST->getCurrentTopLevelHashValue()));
     Clang->setASTConsumer(new MultiplexConsumer(Consumers));
   }
-  Act->Execute();
+  if (!Act->Execute()) {
+    AST->transferASTDataFromCompilerInstance(*Clang);
+    if (OwnAST && ErrAST)
+      ErrAST->swap(OwnAST);
+
+    return 0;
+  }
 
   // Steal the created target, context, and preprocessor.
   AST->transferASTDataFromCompilerInstance(*Clang);
