@@ -312,7 +312,7 @@ def OpenCLImageAccess : Attr {
 }
 
 def DCPU16Interrupt : InheritableAttr {
-  let Spellings = ["dcpu16_intr"];
+  let Spellings = [GNU<"dcpu16_intr">];
   let SemaHandler = 0;
 }
 

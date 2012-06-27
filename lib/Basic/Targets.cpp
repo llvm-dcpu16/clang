@@ -3530,6 +3530,9 @@ namespace {
       // FIXME: Is this really right?
       return "";
     }
+    virtual BuiltinVaListKind getBuiltinVaListKind() const {
+      return TargetInfo::VoidPtrBuiltinVaList;
+    }
     virtual const char *getVAListDeclaration() const {
       // FIXME: implement
       return "typedef char* __builtin_va_list;";
