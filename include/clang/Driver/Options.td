@@ -33,6 +33,7 @@ def d_Group               : OptionGroup<"<d group>">;
 def f_Group               : OptionGroup<"<f group>">, Group<CompileOnly_Group>;
 def f_clang_Group         : OptionGroup<"<f (clang-only) group>">, Group<CompileOnly_Group>;
 def g_Group               : OptionGroup<"<g group>">;
+def g_flags_Group         : OptionGroup<"<g flags group>">;
 def i_Group               : OptionGroup<"<i group>">, Group<CompileOnly_Group>;
 def clang_i_Group         : OptionGroup<"<clang i group>">, Group<i_Group>;
 def m_Group               : OptionGroup<"<m group>">, Group<CompileOnly_Group>;
@@ -407,6 +408,10 @@ def fno_trapping_math : Flag<"-fno-trapping-math">, Group<f_Group>;
 def ffor_scope : Flag<"-ffor-scope">, Group<f_Group>;
 def fno_for_scope : Flag<"-fno-for-scope">, Group<f_Group>;
 
+def frewrite_includes : Flag<"-frewrite-includes">, Group<f_Group>,
+  Flags<[CC1Option]>;
+def fno_rewrite_includes : Flag<"-fno-rewrite-includes">, Group<f_Group>;
+
 def ffreestanding : Flag<"-ffreestanding">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Assert that the compilation takes place in a freestanding environment">;
 def fgnu_keywords : Flag<"-fgnu-keywords">, Group<f_Group>, Flags<[CC1Option]>,
@@ -414,7 +419,7 @@ def fgnu_keywords : Flag<"-fgnu-keywords">, Group<f_Group>, Flags<[CC1Option]>,
 def fgnu89_inline : Flag<"-fgnu89-inline">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Use the gnu89 inline semantics">;
 def fno_gnu89_inline : Flag<"-fno-gnu89-inline">, Group<f_Group>;
-def fgnu_runtime : Flag<"-fgnu-runtime">, Group<f_Group>, Flags<[CC1Option]>,
+def fgnu_runtime : Flag<"-fgnu-runtime">, Group<f_Group>,
   HelpText<"Generate output compatible with the standard GNU Objective-C runtime">;
 def fheinous_gnu_extensions : Flag<"-fheinous-gnu-extensions">, Flags<[CC1Option]>;
 def filelist : Separate<"-filelist">, Flags<[LinkerInput]>;
@@ -561,6 +566,8 @@ def fno_objc_infer_related_result_type : Flag<
 def fobjc_link_runtime: Flag<"-fobjc-link-runtime">, Group<f_Group>;
 
 // Objective-C ABI options.
+def fobjc_runtime_EQ : Joined<"-fobjc-runtime=">, Group<f_Group>, Flags<[CC1Option]>,
+  HelpText<"Specify the target Objective-C runtime kind and version">;
 def fobjc_abi_version_EQ : Joined<"-fobjc-abi-version=">, Group<f_Group>;
 def fobjc_nonfragile_abi_version_EQ : Joined<"-fobjc-nonfragile-abi-version=">, Group<f_Group>;
 def fobjc_nonfragile_abi : Flag<"-fobjc-nonfragile-abi">, Group<f_Group>;
@@ -665,21 +672,34 @@ def ffunction_sections: Flag <"-ffunction-sections">, Group<f_Group>,
 def fdata_sections : Flag <"-fdata-sections">, Group<f_Group>, Flags<[CC1Option]>,
   HelpText<"Place each data in its own section (ELF Only)">;
 def f : Joined<"-f">, Group<f_Group>;
-def g0 : Flag<"-g0">, Group<g_Group>;
-def g2 : Flag<"-g2">, Group<g_Group>;
-def g3 : Flag<"-g3">, Group<g_Group>;
-def gdwarf2 : Flag<"-gdwarf-2">, Group<g_Group>;
-def gfull : Flag<"-gfull">, Group<g_Group>;
-def ggdb : Flag<"-ggdb">, Group<g_Group>;
-def gstabs : Flag<"-gstabs">, Group<g_Group>;
-def gstabsplus : Flag<"-gstabs+">, Group<g_Group>;
-def gstabs1 : Flag<"-gstabs1">, Group<g_Group>;
-def gstabs2 : Flag<"-gstabs2">, Group<g_Group>;
-def gused : Flag<"-gused">, Group<g_Group>;
-def g_Flag : Flag<"-g">, Group<g_Group>, HelpText<"Generate source level debug information">,
-    Flags<[CC1Option]>;
+def g_Flag : Flag<"-g">, Group<g_Group>,
+  HelpText<"Generate source level debug information">, Flags<[CC1Option]>;
 def gline_tables_only : Flag<"-gline-tables-only">, Group<g_Group>,
   HelpText<"Emit debug line number tables only">, Flags<[CC1Option]>;
+def g0 : Flag<"-g0">, Group<g_Group>;
+def g1 : Flag<"-g1">, Group<g_Group>;
+def g2 : Flag<"-g2">, Group<g_Group>;
+def g3 : Flag<"-g3">, Group<g_Group>;
+def ggdb : Flag<"-ggdb">, Group<g_Group>;
+def ggdb0 : Flag<"-ggdb0">, Group<g_Group>;
+def ggdb1 : Flag<"-ggdb1">, Group<g_Group>;
+def ggdb2 : Flag<"-ggdb2">, Group<g_Group>;
+def ggdb3 : Flag<"-ggdb3">, Group<g_Group>;
+def gdwarf_2 : Flag<"-gdwarf-2">, Group<g_Group>;
+def gdwarf_3 : Flag<"-gdwarf-3">, Group<g_Group>;
+def gdwarf_4 : Flag<"-gdwarf-4">, Group<g_Group>;
+def gfull : Flag<"-gfull">, Group<g_Group>;
+def gused : Flag<"-gused">, Group<g_Group>;
+def gstabs : Joined<"-gstabs">, Group<g_Group>, Flags<[Unsupported]>;
+def gcoff : Joined<"-gcoff">, Group<g_Group>, Flags<[Unsupported]>;
+def gxcoff : Joined<"-gxcoff">, Group<g_Group>, Flags<[Unsupported]>;
+def gvms : Joined<"-gvms">, Group<g_Group>, Flags<[Unsupported]>;
+def gtoggle : Flag<"-gtoggle">, Group<g_flags_Group>, Flags<[Unsupported]>;
+def grecord_gcc_switches : Flag<"-grecord-gcc-switches">, Group<g_flags_Group>;
+def gno_record_gcc_switches : Flag<"-gno-record-gcc-switches">,
+  Group<g_flags_Group>;
+def gstrict_dwarf : Flag<"-gstrict-dwarf">, Group<g_flags_Group>;
+def gno_strict_dwarf : Flag<"-gno-strict-dwarf">, Group<g_flags_Group>;
 def headerpad__max__install__names : Joined<"-headerpad_max_install_names">;
 def help : Flag<"-help">, Flags<[CC1Option]>,
   HelpText<"Display available options">;
@@ -729,6 +749,7 @@ def m3dnow : Flag<"-m3dnow">, Group<m_x86_Features_Group>;
 def m64 : Flag<"-m64">, Group<m_Group>, Flags<[DriverOption]>;
 def mabi_EQ : Joined<"-mabi=">, Group<m_Group>;
 def march_EQ : Joined<"-march=">, Group<m_Group>;
+def maltivec : Flag<"-maltivec">, Alias<faltivec>;
 def mcmodel_EQ : Joined<"-mcmodel=">, Group<m_Group>;
 def mconstant_cfstrings : Flag<"-mconstant-cfstrings">, Group<clang_ignored_m_Group>;
 def mcpu_EQ : Joined<"-mcpu=">, Group<m_Group>;
@@ -800,6 +821,8 @@ def mrtd : Flag<"-mrtd">, Group<m_Group>, Flags<[CC1Option]>,
 def msmall_data_threshold_EQ : Joined <"-msmall-data-threshold=">, Group<m_Group>;
 def msoft_float : Flag<"-msoft-float">, Group<m_Group>, Flags<[CC1Option]>,
   HelpText<"Use software floating point">;
+def mno_implicit_float : Flag<"-mno-implicit-float">, Group<m_Group>,
+  HelpText<"Don't generate implicit floating point instructions">;
 def msse2 : Flag<"-msse2">, Group<m_x86_Features_Group>;
 def msse3 : Flag<"-msse3">, Group<m_x86_Features_Group>;
 def msse4a : Flag<"-msse4a">, Group<m_x86_Features_Group>;
@@ -1100,6 +1123,7 @@ def _write_dependencies : Flag<"--write-dependencies">, Alias<MD>;
 def _write_user_dependencies : Flag<"--write-user-dependencies">, Alias<MMD>;
 def _ : Joined<"--">, Flags<[Unsupported]>;
 def mieee_rnd_near : Flag<"-mieee-rnd-near">, Group<m_hexagon_Features_Group>;
+def serialize_diags : Separate<"-serialize-diagnostics">, Alias<_serialize_diags>;
 
 // Special internal option to handle -Xlinker --no-demangle.
 def Z_Xlinker__no_demangle : Flag<"-Z-Xlinker-no-demangle">,

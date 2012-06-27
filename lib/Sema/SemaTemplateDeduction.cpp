@@ -193,7 +193,7 @@ checkDeducedTemplateArguments(ASTContext &Context,
     if (Y.getKind() == TemplateArgument::Expression ||
         Y.getKind() == TemplateArgument::Declaration ||
         (Y.getKind() == TemplateArgument::Integral &&
-         hasSameExtendedValue(*X.getAsIntegral(), *Y.getAsIntegral())))
+         hasSameExtendedValue(X.getAsIntegral(), Y.getAsIntegral())))
       return DeducedTemplateArgument(X,
                                      X.wasDeducedFromArrayBound() &&
                                      Y.wasDeducedFromArrayBound());
@@ -293,7 +293,8 @@ DeduceNonTypeTemplateArgument(Sema &S,
   assert(NTTP->getDepth() == 0 &&
          "Cannot deduce non-type template argument with depth > 0");
 
-  DeducedTemplateArgument NewDeduced(Value, ValueType, DeducedFromArrayBound);
+  DeducedTemplateArgument NewDeduced(S.Context, Value, ValueType,
+                                     DeducedFromArrayBound);
   DeducedTemplateArgument Result = checkDeducedTemplateArguments(S.Context,
                                                      Deduced[NTTP->getIndex()],
                                                                  NewDeduced);
@@ -1595,7 +1596,7 @@ DeduceTemplateArguments(Sema &S,
 
   case TemplateArgument::Integral:
     if (Arg.getKind() == TemplateArgument::Integral) {
-      if (hasSameExtendedValue(*Param.getAsIntegral(), *Arg.getAsIntegral()))
+      if (hasSameExtendedValue(Param.getAsIntegral(), Arg.getAsIntegral()))
         return Sema::TDK_Success;
 
       Info.FirstArg = Param;
@@ -1618,7 +1619,7 @@ DeduceTemplateArguments(Sema &S,
           = getDeducedParameterFromExpr(Param.getAsExpr())) {
       if (Arg.getKind() == TemplateArgument::Integral)
         return DeduceNonTypeTemplateArgument(S, NTTP,
-                                             *Arg.getAsIntegral(),
+                                             Arg.getAsIntegral(),
                                              Arg.getIntegralType(),
                                              /*ArrayBound=*/false,
                                              Info, Deduced);
@@ -1867,7 +1868,7 @@ static bool isSameTemplateArg(ASTContext &Context,
                     Y.getAsTemplateOrTemplatePattern()).getAsVoidPointer();
 
     case TemplateArgument::Integral:
-      return *X.getAsIntegral() == *Y.getAsIntegral();
+      return X.getAsIntegral() == Y.getAsIntegral();
 
     case TemplateArgument::Expression: {
       llvm::FoldingSetNodeID XID, YID;
@@ -1898,7 +1899,7 @@ static bool isSameTemplateArg(ASTContext &Context,
 ///
 /// \param S The semantic analysis object.
 ///
-/// \param The template argument we are producing template argument
+/// \param Arg The template argument we are producing template argument
 /// location information for.
 ///
 /// \param NTTPType For a declaration template argument, the type of
@@ -2198,7 +2199,7 @@ static bool isSimpleTemplateIdType(QualType T) {
 /// \param FunctionTemplate the function template into which the explicit
 /// template arguments will be substituted.
 ///
-/// \param ExplicitTemplateArguments the explicitly-specified template
+/// \param ExplicitTemplateArgs the explicitly-specified template
 /// arguments.
 ///
 /// \param Deduced the deduced template arguments, which will be populated
@@ -2964,7 +2965,7 @@ DeduceTemplateArgumentByListElement(Sema &S,
 /// \param FunctionTemplate the function template for which we are performing
 /// template argument deduction.
 ///
-/// \param ExplicitTemplateArguments the explicit template arguments provided
+/// \param ExplicitTemplateArgs the explicit template arguments provided
 /// for this call.
 ///
 /// \param Args the function call arguments
@@ -3224,7 +3225,7 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
 /// \param FunctionTemplate the function template for which we are performing
 /// template argument deduction.
 ///
-/// \param ExplicitTemplateArguments the explicitly-specified template
+/// \param ExplicitTemplateArgs the explicitly-specified template
 /// arguments.
 ///
 /// \param ArgFunctionType the function type that will be used as the
@@ -3407,7 +3408,7 @@ Sema::DeduceTemplateArguments(FunctionTemplateDecl *FunctionTemplate,
 /// \param FunctionTemplate the function template for which we are performing
 /// template argument deduction.
 ///
-/// \param ExplicitTemplateArguments the explicitly-specified template
+/// \param ExplicitTemplateArgs the explicitly-specified template
 /// arguments.
 ///
 /// \param Specialization if template argument deduction was successful,
@@ -4454,13 +4455,13 @@ MarkUsedTemplateParameters(ASTContext &Ctx,
   }
 }
 
-/// \brief Mark the template parameters can be deduced by the given
+/// \brief Mark which template parameters can be deduced from a given
 /// template argument list.
 ///
 /// \param TemplateArgs the template argument list from which template
 /// parameters will be deduced.
 ///
-/// \param Deduced a bit vector whose elements will be set to \c true
+/// \param Used a bit vector whose elements will be set to \c true
 /// to indicate when the corresponding template parameter will be
 /// deduced.
 void

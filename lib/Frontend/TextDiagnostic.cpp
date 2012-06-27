@@ -179,7 +179,7 @@ static void expandTabs(std::string &SourceLine, unsigned TabStop) {
 ///
 ///    "a \t \u3042" -> {0,1,2,8,9,-1,-1,11}
 ///
-///  (\u3042 is represented in UTF-8 by three bytes and takes two columns to
+///  (\\u3042 is represented in UTF-8 by three bytes and takes two columns to
 ///   display)
 static void byteToColumn(StringRef SourceLine, unsigned TabStop,
                          SmallVectorImpl<int> &out) {
@@ -213,7 +213,7 @@ static void byteToColumn(StringRef SourceLine, unsigned TabStop,
 ///
 ///    "a \t \u3042" -> {0,1,2,-1,-1,-1,-1,-1,3,4,-1,7}
 ///
-///  (\u3042 is represented in UTF-8 by three bytes and takes two columns to
+///  (\\u3042 is represented in UTF-8 by three bytes and takes two columns to
 ///   display)
 static void columnToByte(StringRef SourceLine, unsigned TabStop,
                          SmallVectorImpl<int> &out) {
@@ -307,11 +307,11 @@ static void selectInterestingSourceRegion(std::string &SourceLine,
   // correctly.
   unsigned CaretStart = 0, CaretEnd = CaretLine.size();
   for (; CaretStart != CaretEnd; ++CaretStart)
-    if (!isspace(CaretLine[CaretStart]))
+    if (!isspace(static_cast<unsigned char>(CaretLine[CaretStart])))
       break;
 
   for (; CaretEnd != CaretStart; --CaretEnd)
-    if (!isspace(CaretLine[CaretEnd - 1]))
+    if (!isspace(static_cast<unsigned char>(CaretLine[CaretEnd - 1])))
       break;
 
   // caret has already been inserted into CaretLine so the above whitespace
@@ -322,16 +322,32 @@ static void selectInterestingSourceRegion(std::string &SourceLine,
   if (!FixItInsertionLine.empty()) {
     unsigned FixItStart = 0, FixItEnd = FixItInsertionLine.size();
     for (; FixItStart != FixItEnd; ++FixItStart)
-      if (!isspace(FixItInsertionLine[FixItStart]))
+      if (!isspace(static_cast<unsigned char>(FixItInsertionLine[FixItStart])))
         break;
 
     for (; FixItEnd != FixItStart; --FixItEnd)
-      if (!isspace(FixItInsertionLine[FixItEnd - 1]))
+      if (!isspace(static_cast<unsigned char>(FixItInsertionLine[FixItEnd - 1])))
         break;
 
     CaretStart = std::min(FixItStart, CaretStart);
     CaretEnd = std::max(FixItEnd, CaretEnd);
   }
+
+  // CaretEnd may have been set at the middle of a character
+  // If it's not at a character's first column then advance it past the current
+  //   character.
+  while (static_cast<int>(CaretEnd) < map.columns() &&
+         -1 == map.columnToByte(CaretEnd))
+    ++CaretEnd;
+
+  assert((static_cast<int>(CaretStart) > map.columns() ||
+          -1!=map.columnToByte(CaretStart)) &&
+         "CaretStart must not point to a column in the middle of a source"
+         " line character");
+  assert((static_cast<int>(CaretEnd) > map.columns() ||
+          -1!=map.columnToByte(CaretEnd)) &&
+         "CaretEnd must not point to a column in the middle of a source line"
+         " character");
 
   // CaretLine[CaretStart, CaretEnd) contains all of the interesting
   // parts of the caret line. While this slice is smaller than the
@@ -366,12 +382,14 @@ static void selectInterestingSourceRegion(std::string &SourceLine,
       // Skip over any whitespace we see here; we're looking for
       // another bit of interesting text.
       while (NewStart &&
-             (map.byteToColumn(NewStart)==-1 || isspace(SourceLine[NewStart])))
+             (map.byteToColumn(NewStart)==-1 ||
+             isspace(static_cast<unsigned char>(SourceLine[NewStart]))))
         --NewStart;
 
       // Skip over this bit of "interesting" text.
       while (NewStart &&
-             (map.byteToColumn(NewStart)!=-1 && !isspace(SourceLine[NewStart])))
+             (map.byteToColumn(NewStart)!=-1 &&
+             !isspace(static_cast<unsigned char>(SourceLine[NewStart]))))
         --NewStart;
 
       // Move up to the non-whitespace character we just saw.
@@ -392,12 +410,14 @@ static void selectInterestingSourceRegion(std::string &SourceLine,
       // Skip over any whitespace we see here; we're looking for
       // another bit of interesting text.
       while (NewEnd<SourceLine.size() &&
-             (map.byteToColumn(NewEnd)==-1 || isspace(SourceLine[NewEnd])))
+             (map.byteToColumn(NewEnd)==-1 ||
+             isspace(static_cast<unsigned char>(SourceLine[NewEnd]))))
         ++NewEnd;
 
       // Skip over this bit of "interesting" text.
       while (NewEnd<SourceLine.size() &&
-             (map.byteToColumn(NewEnd)!=-1 && !isspace(SourceLine[NewEnd])))
+             (map.byteToColumn(NewEnd)!=-1 &&
+             !isspace(static_cast<unsigned char>(SourceLine[NewEnd]))))
         ++NewEnd;
 
       unsigned NewColumns = map.byteToColumn(NewEnd) -
@@ -1070,6 +1090,7 @@ std::string TextDiagnostic::buildFixItInsertionLine(
   std::string FixItInsertionLine;
   if (Hints.empty() || !DiagOpts.ShowFixits)
     return FixItInsertionLine;
+  unsigned PrevHintEnd = 0;
 
   for (ArrayRef<FixItHint>::iterator I = Hints.begin(), E = Hints.end();
        I != E; ++I) {
@@ -1087,6 +1108,16 @@ std::string TextDiagnostic::buildFixItInsertionLine(
         assert(HintColNo<static_cast<unsigned>(map.bytes())+1);
         HintColNo = map.byteToColumn(HintColNo);
 
+        // If we inserted a long previous hint, push this one forwards, and add
+        // an extra space to show that this is not part of the previous
+        // completion. This is sort of the best we can do when two hints appear
+        // to overlap.
+        //
+        // Note that if this hint is located immediately after the previous
+        // hint, no space will be added, since the location is more important.
+        if (HintColNo < PrevHintEnd)
+          HintColNo = PrevHintEnd + 1;
+
         // FIXME: if the fixit includes tabs or other characters that do not
         //  take up a single column per byte when displayed then
         //  I->CodeToInsert.size() is not a column number and we're mixing
@@ -1095,19 +1126,16 @@ std::string TextDiagnostic::buildFixItInsertionLine(
         unsigned LastColumnModified
           = HintColNo + I->CodeToInsert.size();
 
-        if (LastColumnModified > static_cast<unsigned>(map.bytes())) {
-          unsigned LastExistingColumn = map.byteToColumn(map.bytes());
-          unsigned AddedColumns = LastColumnModified-LastExistingColumn;
-          LastColumnModified = LastExistingColumn + AddedColumns;
-        } else {
+        if (LastColumnModified <= static_cast<unsigned>(map.bytes()))
           LastColumnModified = map.byteToColumn(LastColumnModified);
-        }
 
         if (LastColumnModified > FixItInsertionLine.size())
           FixItInsertionLine.resize(LastColumnModified, ' ');
         assert(HintColNo+I->CodeToInsert.size() <= FixItInsertionLine.size());
         std::copy(I->CodeToInsert.begin(), I->CodeToInsert.end(),
                   FixItInsertionLine.begin() + HintColNo);
+
+        PrevHintEnd = LastColumnModified;
       } else {
         FixItInsertionLine.clear();
         break;

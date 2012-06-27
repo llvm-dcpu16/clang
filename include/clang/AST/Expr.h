@@ -179,11 +179,12 @@ public:
   SourceLocation getExprLoc() const LLVM_READONLY;
 
   /// isUnusedResultAWarning - Return true if this immediate expression should
-  /// be warned about if the result is unused.  If so, fill in Loc and Ranges
-  /// with location to warn on and the source range[s] to report with the
-  /// warning.
-  bool isUnusedResultAWarning(SourceLocation &Loc, SourceRange &R1,
-                              SourceRange &R2, ASTContext &Ctx) const;
+  /// be warned about if the result is unused.  If so, fill in expr, location,
+  /// and ranges with expr to warn on and source locations/ranges appropriate
+  /// for a warning.
+  bool isUnusedResultAWarning(const Expr *&WarnExpr, SourceLocation &Loc,
+                              SourceRange &R1, SourceRange &R2,
+                              ASTContext &Ctx) const;
 
   /// isLValue - True if this expression is an "l-value" according to
   /// the rules of the current language.  C and C++ give somewhat
@@ -212,7 +213,8 @@ public:
     LV_InvalidMessageExpression,
     LV_MemberFunction,
     LV_SubObjCPropertySetting,
-    LV_ClassTemporary
+    LV_ClassTemporary,
+    LV_ArrayTemporary
   };
   /// Reasons why an expression might not be an l-value.
   LValueClassification ClassifyLValue(ASTContext &Ctx) const;
@@ -223,7 +225,7 @@ public:
   /// recursively, any member or element of all contained aggregates or unions)
   /// with a const-qualified type.
   ///
-  /// \param Loc [in] [out] - A source location which *may* be filled
+  /// \param Loc [in,out] - A source location which *may* be filled
   /// in with the location of the expression making this a
   /// non-modifiable lvalue, if specified.
   enum isModifiableLvalueResult {
@@ -241,7 +243,8 @@ public:
     MLV_MemberFunction,
     MLV_SubObjCPropertySetting,
     MLV_InvalidMessageExpression,
-    MLV_ClassTemporary
+    MLV_ClassTemporary,
+    MLV_ArrayTemporary
   };
   isModifiableLvalueResult isModifiableLvalue(ASTContext &Ctx,
                                               SourceLocation *Loc = 0) const;
@@ -260,7 +263,8 @@ public:
       CL_DuplicateVectorComponents, // A vector shuffle with dupes.
       CL_MemberFunction, // An expression referring to a member function
       CL_SubObjCPropertySetting,
-      CL_ClassTemporary, // A prvalue of class type
+      CL_ClassTemporary, // A temporary of class type, or subobject thereof.
+      CL_ArrayTemporary, // A temporary of array type.
       CL_ObjCMessageRValue, // ObjC message is an rvalue
       CL_PRValue // A prvalue for any other reason, of any other type
     };
@@ -661,6 +665,13 @@ public:
 
   static bool hasAnyTypeDependentArguments(llvm::ArrayRef<Expr *> Exprs);
 
+  /// \brief If we have class type (or pointer to class type), return the
+  /// class decl. Return NULL otherwise.
+  ///
+  /// If this expression is a cast, this method looks through it to find the
+  /// most derived decl that can be infered from the expression.
+  const CXXRecordDecl *getMostDerivedClassDeclForType() const;
+
   static bool classof(const Stmt *T) {
     return T->getStmtClass() >= firstExprConstant &&
            T->getStmtClass() <= lastExprConstant;
@@ -1043,6 +1054,7 @@ public:
   enum IdentType {
     Func,
     Function,
+    LFunction,  // Same as Function, but as wide string.
     PrettyFunction,
     /// PrettyFunctionNoVirtual - The same as PrettyFunction, except that the
     /// 'virtual' keyword is omitted for virtual member functions.
@@ -1382,8 +1394,8 @@ public:
     	return StringRef(StrData.asChar, getByteLength()).removeZero();
   }
 
-  /// Allow clients that need the byte representation, such as ASTWriterStmt
-  /// ::VisitStringLiteral(), access.
+  /// Allow access to clients that need the byte representation, such as
+  /// ASTWriterStmt::VisitStringLiteral().
   StringRef getBytes() const {
     // FIXME: StringRef may not be the right type to use as a result for this.
     if (CharByteWidth == 1)
@@ -1395,6 +1407,8 @@ public:
     return StringRef(reinterpret_cast<const char*>(StrData.asUInt16),
                      getByteLength());
   }
+
+  void outputString(raw_ostream &OS);
 
   uint32_t getCodeUnit(size_t i) const {
     assert(i < Length && "out of bounds access");

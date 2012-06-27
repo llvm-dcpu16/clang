@@ -522,8 +522,6 @@ public:
   void setLocalFastQualifiers(unsigned Quals) { Value.setInt(Quals); }
 
   /// Retrieves a pointer to the underlying (unqualified) type.
-  /// This should really return a const Type, but it's not worth
-  /// changing all the users right now.
   ///
   /// This function requires that the type not be NULL. If the type might be
   /// NULL, use the (slightly less efficient) \c getTypePtrOrNull().
@@ -1649,7 +1647,7 @@ public:
   AutoType *getContainedAutoType() const;
 
   /// Member-template getAs<specific type>'.  Look through sugar for
-  /// an instance of <specific type>.   This scheme will eventually
+  /// an instance of \<specific type>.   This scheme will eventually
   /// replace the specific getAsXXXX methods above.
   ///
   /// There are some specializations of this member template listed
@@ -1661,7 +1659,7 @@ public:
   const ArrayType *getAsArrayTypeUnsafe() const;
 
   /// Member-template castAs<specific type>.  Look through sugar for
-  /// the underlying instance of <specific type>.
+  /// the underlying instance of \<specific type>.
   ///
   /// This method has the same relationship to getAs<T> as cast<T> has
   /// to dyn_cast<T>; which is to say, the underlying type *must*
@@ -3703,7 +3701,7 @@ public:
   unsigned getNumArgs() const { return NumArgs; }
 
   /// \brief Retrieve a specific template argument as a type.
-  /// \precondition @c isArgType(Arg)
+  /// \pre @c isArgType(Arg)
   const TemplateArgument &getArg(unsigned Idx) const; // in TemplateBase.h
 
   bool isSugared() const {
@@ -4159,8 +4157,10 @@ public:
 /// list of protocols.
 ///
 /// Given the following declarations:
-///   @class C;
-///   @protocol P;
+/// \code
+///   \@class C;
+///   \@protocol P;
+/// \endcode
 ///
 /// 'C' is an ObjCInterfaceType C.  It is sugar for an ObjCObjectType
 /// with base C and no protocols.
@@ -4374,11 +4374,13 @@ public:
   /// This method is equivalent to getPointeeType() except that
   /// it discards any typedefs (or other sugar) between this
   /// type and the "outermost" object type.  So for:
-  ///   @class A; @protocol P; @protocol Q;
+  /// \code
+  ///   \@class A; \@protocol P; \@protocol Q;
   ///   typedef A<P> AP;
   ///   typedef A A1;
   ///   typedef A1<P> A1P;
   ///   typedef A1P<Q> A1PQ;
+  /// \endcode
   /// For 'A*', getObjectType() will return 'A'.
   /// For 'A<P>*', getObjectType() will return 'A<P>'.
   /// For 'AP*', getObjectType() will return 'A<P>'.
@@ -4395,7 +4397,7 @@ public:
   }
 
   /// getInterfaceType - If this pointer points to an Objective C
-  /// @interface type, gets the type for that interface.  Any protocol
+  /// \@interface type, gets the type for that interface.  Any protocol
   /// qualifiers on the interface are ignored.
   ///
   /// \return null if the base type for this pointer is 'id' or 'Class'
@@ -4403,7 +4405,7 @@ public:
     return getObjectType()->getBaseType()->getAs<ObjCInterfaceType>();
   }
 
-  /// getInterfaceDecl - If this pointer points to an Objective @interface
+  /// getInterfaceDecl - If this pointer points to an Objective \@interface
   /// type, gets the declaration for that interface.
   ///
   /// \return null if the base type for this pointer is 'id' or 'Class'
@@ -5032,7 +5034,7 @@ struct ArrayType_cannot_be_used_with_getAs { };
 template<typename T>
 struct ArrayType_cannot_be_used_with_getAs<T, true>;
 
-/// Member-template getAs<specific type>'.
+// Member-template getAs<specific type>'.
 template <typename T> const T *Type::getAs() const {
   ArrayType_cannot_be_used_with_getAs<T> at;
   (void)at;

@@ -165,7 +165,7 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
                                              SourceLocation LocalRangeBegin,
                                              SourceLocation LocalRangeEnd,
                                              Declarator &TheDeclarator,
-                                             ParsedType TrailingReturnType) {
+                                             TypeResult TrailingReturnType) {
   DeclaratorChunk I;
   I.Kind                        = Function;
   I.Loc                         = LocalRangeBegin;
@@ -188,7 +188,9 @@ DeclaratorChunk DeclaratorChunk::getFunction(bool hasProto, bool isVariadic,
   I.Fun.NumExceptions           = 0;
   I.Fun.Exceptions              = 0;
   I.Fun.NoexceptExpr            = 0;
-  I.Fun.TrailingReturnType   = TrailingReturnType.getAsOpaquePtr();
+  I.Fun.HasTrailingReturnType   = TrailingReturnType.isUsable() ||
+                                  TrailingReturnType.isInvalid();
+  I.Fun.TrailingReturnType      = TrailingReturnType.get();
 
   // new[] an argument array if needed.
   if (NumArgs) {
@@ -418,19 +420,27 @@ const char *DeclSpec::getSpecifierName(TQ T) {
 bool DeclSpec::SetStorageClassSpec(Sema &S, SCS SC, SourceLocation Loc,
                                    const char *&PrevSpec,
                                    unsigned &DiagID) {
-  // OpenCL 1.1 6.8g: "The extern, static, auto and register storage-class
-  // specifiers are not supported."
+  // OpenCL v1.1 s6.8g: "The extern, static, auto and register storage-class
+  // specifiers are not supported.
   // It seems sensible to prohibit private_extern too
   // The cl_clang_storage_class_specifiers extension enables support for
   // these storage-class specifiers.
+  // OpenCL v1.2 s6.8 changes this to "The auto and register storage-class
+  // specifiers are not supported."
   if (S.getLangOpts().OpenCL &&
       !S.getOpenCLOptions().cl_clang_storage_class_specifiers) {
     switch (SC) {
     case SCS_extern:
     case SCS_private_extern:
+    case SCS_static:
+        if (S.getLangOpts().OpenCLVersion < 120) {
+          DiagID   = diag::err_not_opencl_storage_class_specifier;
+          PrevSpec = getSpecifierName(SC);
+          return true;
+        }
+        break;
     case SCS_auto:
     case SCS_register:
-    case SCS_static:
       DiagID   = diag::err_not_opencl_storage_class_specifier;
       PrevSpec = getSpecifierName(SC);
       return true;
@@ -751,7 +761,7 @@ void DeclSpec::SaveWrittenBuiltinSpecs() {
   writtenBS.ModeAttr = false;
   AttributeList* attrs = getAttributes().getList();
   while (attrs) {
-    if (attrs->getKind() == AttributeList::AT_mode) {
+    if (attrs->getKind() == AttributeList::AT_Mode) {
       writtenBS.ModeAttr = true;
       break;
     }
@@ -933,13 +943,6 @@ bool DeclSpec::isMissingDeclaratorOk() {
   TST tst = getTypeSpecType();
   return isDeclRep(tst) && getRepAsDecl() != 0 &&
     StorageClassSpec != DeclSpec::SCS_typedef;
-}
-
-void UnqualifiedId::clear() {
-  Kind = IK_Identifier;
-  Identifier = 0;
-  StartLocation = SourceLocation();
-  EndLocation = SourceLocation();
 }
 
 void UnqualifiedId::setOperatorFunctionId(SourceLocation OperatorLoc, 

@@ -2121,7 +2121,7 @@ PushProtocolProperties(llvm::SmallPtrSet<const IdentifierInfo*,16> &PropertySet,
     PushProtocolProperties(PropertySet, Properties, Container, (*P), ObjCTypes);
   for (ObjCContainerDecl::prop_iterator I = PROTO->prop_begin(),
        E = PROTO->prop_end(); I != E; ++I) {
-    const ObjCPropertyDecl *PD = &*I;
+    const ObjCPropertyDecl *PD = *I;
     if (!PropertySet.insert(PD->getIdentifier()))
       continue;
     llvm::Constant *Prop[] = {
@@ -2152,7 +2152,7 @@ llvm::Constant *CGObjCCommonMac::EmitPropertyList(Twine Name,
   llvm::SmallPtrSet<const IdentifierInfo*, 16> PropertySet;
   for (ObjCContainerDecl::prop_iterator I = OCD->prop_begin(),
          E = OCD->prop_end(); I != E; ++I) {
-    const ObjCPropertyDecl *PD = &*I;
+    const ObjCPropertyDecl *PD = *I;
     PropertySet.insert(PD->getIdentifier());
     llvm::Constant *Prop[] = {
       GetPropertyName(PD->getIdentifier()),
@@ -2403,7 +2403,7 @@ void CGObjCMac::GenerateClass(const ObjCImplementationDecl *ID) {
 
   for (ObjCImplementationDecl::propimpl_iterator
          i = ID->propimpl_begin(), e = ID->propimpl_end(); i != e; ++i) {
-    ObjCPropertyImplDecl *PID = &*i;
+    ObjCPropertyImplDecl *PID = *i;
 
     if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize) {
       ObjCPropertyDecl *PD = PID->getPropertyDecl();
@@ -3821,7 +3821,7 @@ void CGObjCCommonMac::BuildAggrIvarRecordLayout(const RecordType *RT,
   SmallVector<const FieldDecl*, 16> Fields;
   for (RecordDecl::field_iterator i = RD->field_begin(),
                                   e = RD->field_end(); i != e; ++i)
-    Fields.push_back(&*i);
+    Fields.push_back(*i);
   llvm::Type *Ty = CGM.getTypes().ConvertType(QualType(RT, 0));
   const llvm::StructLayout *RecLayout =
     CGM.getTargetData().getStructLayout(cast<llvm::StructType>(Ty));
@@ -4386,9 +4386,10 @@ ObjCCommonTypesHelper::ObjCCommonTypesHelper(CodeGen::CodeGenModule &cgm)
                                       SourceLocation(), SourceLocation(),
                                       &Ctx.Idents.get("_objc_super"));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCIdType(), 0, 0, false, false));
+                                Ctx.getObjCIdType(), 0, 0, false, ICIS_NoInit));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCClassType(), 0, 0, false, false));
+                                Ctx.getObjCClassType(), 0, 0, false,
+                                ICIS_NoInit));
   RD->completeDefinition();
 
   SuperCTy = Ctx.getTagDeclType(RD);
@@ -4767,9 +4768,10 @@ ObjCNonFragileABITypesHelper::ObjCNonFragileABITypesHelper(CodeGen::CodeGenModul
                                       SourceLocation(), SourceLocation(),
                                       &Ctx.Idents.get("_message_ref_t"));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.VoidPtrTy, 0, 0, false, false));
+                                Ctx.VoidPtrTy, 0, 0, false, ICIS_NoInit));
   RD->addDecl(FieldDecl::Create(Ctx, RD, SourceLocation(), SourceLocation(), 0,
-                                Ctx.getObjCSelType(), 0, 0, false, false));
+                                Ctx.getObjCSelType(), 0, 0, false,
+                                ICIS_NoInit));
   RD->completeDefinition();
 
   MessageRefCTy = Ctx.getTagDeclType(RD);
@@ -5004,7 +5006,7 @@ llvm::GlobalVariable * CGObjCNonFragileABIMac::BuildClassRoTInitializer(
     }
     for (ObjCImplementationDecl::propimpl_iterator
            i = ID->propimpl_begin(), e = ID->propimpl_end(); i != e; ++i) {
-      ObjCPropertyImplDecl *PID = &*i;
+      ObjCPropertyImplDecl *PID = *i;
 
       if (PID->getPropertyImplementation() == ObjCPropertyImplDecl::Synthesize){
         ObjCPropertyDecl *PD = PID->getPropertyDecl();
@@ -6379,7 +6381,17 @@ CGObjCNonFragileABIMac::GetInterfaceEHType(const ObjCInterfaceDecl *ID,
 
 CodeGen::CGObjCRuntime *
 CodeGen::CreateMacObjCRuntime(CodeGen::CodeGenModule &CGM) {
-  if (CGM.getLangOpts().ObjCNonFragileABI)
-    return new CGObjCNonFragileABIMac(CGM);
+  switch (CGM.getLangOpts().ObjCRuntime.getKind()) {
+  case ObjCRuntime::FragileMacOSX:
   return new CGObjCMac(CGM);
+
+  case ObjCRuntime::MacOSX:
+  case ObjCRuntime::iOS:
+    return new CGObjCNonFragileABIMac(CGM);
+
+  case ObjCRuntime::GNU:
+  case ObjCRuntime::FragileGNU:
+    llvm_unreachable("these runtimes are not Mac runtimes");
+  }
+  llvm_unreachable("bad runtime");
 }

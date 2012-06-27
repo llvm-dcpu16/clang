@@ -126,7 +126,7 @@ class TranslationUnitSaveError(Exception):
                             "value supported." % enumeration)
 
         self.save_error = enumeration
-        Exception.__init__(self, message)
+        Exception.__init__(self, 'Error %d: %s' % (enumeration, message))
 
 ### Structures and Utility Classes ###
 
@@ -168,6 +168,16 @@ class SourceLocation(Structure):
         a particular translation unit.
         """
         return SourceLocation_getLocation(tu, file, line, column)
+
+    @staticmethod
+    def from_offset(tu, file, offset):
+        """Retrieve a SourceLocation from a given character offset.
+
+        tu -- TranslationUnit file belongs to
+        file -- File instance to obtain offset from
+        offset -- Integer character offset within file
+        """
+        return SourceLocation_getLocationForOffset(tu, file, offset)
 
     @property
     def file(self):
@@ -677,7 +687,7 @@ CursorKind.BINARY_OPERATOR = CursorKind(114)
 CursorKind.COMPOUND_ASSIGNMENT_OPERATOR = CursorKind(115)
 
 # The ?: ternary operator.
-CursorKind.CONDITONAL_OPERATOR = CursorKind(116)
+CursorKind.CONDITIONAL_OPERATOR = CursorKind(116)
 
 # An explicit cast in C (C99 6.5.4) or a C-style cast in C++
 # (C++ [expr.cast]), which uses the syntax (Type)expr.
@@ -929,7 +939,12 @@ class Cursor(Structure):
 
     @staticmethod
     def from_location(tu, location):
-        return Cursor_get(tu, location)
+        # We store a reference to the TU in the instance so the TU won't get
+        # collected before the cursor.
+        cursor = Cursor_get(tu, location)
+        cursor._tu = tu
+
+        return cursor
 
     def __eq__(self, other):
         return Cursor_eq(self, other)
@@ -943,6 +958,12 @@ class Cursor(Structure):
         definition of that entity.
         """
         return Cursor_is_def(self)
+
+    def is_static_method(self):
+        """Returns True if the cursor refers to a C++ member function or member
+        function template that is declared 'static'.
+        """
+        return Cursor_is_static_method(self)
 
     def get_definition(self):
         """
@@ -1022,6 +1043,28 @@ class Cursor(Structure):
         if not hasattr(self, '_type'):
             self._type = Cursor_type(self)
         return self._type
+
+    @property
+    def canonical(self):
+        """Return the canonical Cursor corresponding to this Cursor.
+
+        The canonical cursor is the cursor which is representative for the
+        underlying entity. For example, if you have multiple forward
+        declarations for the same class, the canonical cursor for the forward
+        declarations will be identical.
+        """
+        if not hasattr(self, '_canonical'):
+            self._canonical = Cursor_canonical(self)
+
+        return self._canonical
+
+    @property
+    def result_type(self):
+        """Retrieve the Type of the result for this Cursor."""
+        if not hasattr(self, '_result_type'):
+            self._result_type = Type_get_result(self.type)
+
+        return self._result_type
 
     @property
     def underlying_typedef_type(self):
@@ -1105,6 +1148,13 @@ class Cursor(Structure):
 
         return self._lexical_parent
 
+    @property
+    def translation_unit(self):
+        """Returns the TranslationUnit to which this Cursor belongs."""
+        # If this triggers an AttributeError, the instance was not properly
+        # created.
+        return self._tu
+
     def get_children(self):
         """Return an iterator for accessing the children of this cursor."""
 
@@ -1113,6 +1163,9 @@ class Cursor(Structure):
             # FIXME: Document this assertion in API.
             # FIXME: There should just be an isNull method.
             assert child != Cursor_null()
+
+            # Create reference to TU so it isn't GC'd before Cursor.
+            child._tu = self._tu
             children.append(child)
             return 1 # continue
         children = []
@@ -1125,6 +1178,22 @@ class Cursor(Structure):
         # FIXME: There should just be an isNull method.
         if res == Cursor_null():
             return None
+
+        # Store a reference to the TU in the Python object so it won't get GC'd
+        # before the Cursor.
+        tu = None
+        for arg in args:
+            if isinstance(arg, TranslationUnit):
+                tu = arg
+                break
+
+            if hasattr(arg, 'translation_unit'):
+                tu = arg.translation_unit
+                break
+
+        assert tu is not None
+
+        res._tu = tu
         return res
 
 
@@ -1302,9 +1371,26 @@ class Type(Structure):
 
         return result
 
+    @property
+    def translation_unit(self):
+        """The TranslationUnit to which this Type is associated."""
+        # If this triggers an AttributeError, the instance was not properly
+        # instantiated.
+        return self._tu
+
     @staticmethod
     def from_result(res, fn, args):
         assert isinstance(res, Type)
+
+        tu = None
+        for arg in args:
+            if hasattr(arg, 'translation_unit'):
+                tu = arg.translation_unit
+                break
+
+        assert tu is not None
+        res._tu = tu
+
         return res
 
     def get_canonical(self):
@@ -1739,6 +1825,9 @@ class TranslationUnit(ClangObject):
         options is a bitwise or of TranslationUnit.PARSE_XXX flags which will
         control parsing behavior.
 
+        index is an Index instance to utilize. If not provided, a new Index
+        will be created for this TranslationUnit.
+
         To parse source from the filesystem, the filename of the file to parse
         is specified by the filename argument. Or, filename could be None and
         the args list would contain the filename(s) to parse.
@@ -1925,7 +2014,7 @@ class TranslationUnit(ClangObject):
             raise TranslationUnitSaveError(result,
                 'Error saving TranslationUnit.')
 
-    def codeComplete(self, path, line, column, unsaved_files=[], options=0):
+    def codeComplete(self, path, line, column, unsaved_files=None, options=0):
         """
         Code complete in this translation unit.
 
@@ -2031,6 +2120,10 @@ SourceLocation_equalLocations = lib.clang_equalLocations
 SourceLocation_equalLocations.argtypes = [SourceLocation, SourceLocation]
 SourceLocation_equalLocations.restype = bool
 
+SourceLocation_getLocationForOffset = lib.clang_getLocationForOffset
+SourceLocation_getLocationForOffset.argtypes = [TranslationUnit, File, c_uint]
+SourceLocation_getLocationForOffset.restype = SourceLocation
+
 # Source Range Functions
 SourceRange_getRange = lib.clang_getRange
 SourceRange_getRange.argtypes = [SourceLocation, SourceLocation]
@@ -2103,6 +2196,10 @@ Cursor_is_def = lib.clang_isCursorDefinition
 Cursor_is_def.argtypes = [Cursor]
 Cursor_is_def.restype = bool
 
+Cursor_is_static_method = lib.clang_CXXMethod_isStatic
+Cursor_is_static_method.argtypes = [Cursor]
+Cursor_is_static_method.restype = bool
+
 Cursor_def = lib.clang_getCursorDefinition
 Cursor_def.argtypes = [Cursor]
 Cursor_def.restype = Cursor
@@ -2138,6 +2235,11 @@ Cursor_ref = lib.clang_getCursorReferenced
 Cursor_ref.argtypes = [Cursor]
 Cursor_ref.restype = Cursor
 Cursor_ref.errcheck = Cursor.from_result
+
+Cursor_canonical = lib.clang_getCanonicalCursor
+Cursor_canonical.argtypes = [Cursor]
+Cursor_canonical.restype = Cursor
+Cursor_canonical.errcheck = Cursor.from_result
 
 Cursor_type = lib.clang_getCursorType
 Cursor_type.argtypes = [Cursor]

@@ -375,7 +375,7 @@ InitListChecker::FillInValueInitializations(const InitializedEntity &Entity,
         if (hadError)
           return;
 
-        FillInValueInitForField(Init, &*Field, Entity, ILE, RequiresSecondPass);
+        FillInValueInitForField(Init, *Field, Entity, ILE, RequiresSecondPass);
         if (hadError)
           return;
 
@@ -1336,9 +1336,9 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
       if (Field->getDeclName()) {
         if (VerifyOnly)
           CheckValueInitializable(
-              InitializedEntity::InitializeMember(&*Field, &Entity));
+              InitializedEntity::InitializeMember(*Field, &Entity));
         else
-          StructuredList->setInitializedFieldInUnion(&*Field);
+          StructuredList->setInitializedFieldInUnion(*Field);
         break;
       }
     }
@@ -1401,9 +1401,9 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     // Make sure we can use this declaration.
     bool InvalidUse;
     if (VerifyOnly)
-      InvalidUse = !SemaRef.CanUseDecl(&*Field);
+      InvalidUse = !SemaRef.CanUseDecl(*Field);
     else
-      InvalidUse = SemaRef.DiagnoseUseOfDecl(&*Field,
+      InvalidUse = SemaRef.DiagnoseUseOfDecl(*Field,
                                           IList->getInit(Index)->getLocStart());
     if (InvalidUse) {
       ++Index;
@@ -1413,14 +1413,14 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     }
 
     InitializedEntity MemberEntity =
-      InitializedEntity::InitializeMember(&*Field, &Entity);
+      InitializedEntity::InitializeMember(*Field, &Entity);
     CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
                         StructuredList, StructuredIndex);
     InitializedSomething = true;
 
     if (DeclType->isUnionType() && !VerifyOnly) {
       // Initialize the first field within the union.
-      StructuredList->setInitializedFieldInUnion(&*Field);
+      StructuredList->setInitializedFieldInUnion(*Field);
     }
 
     ++Field;
@@ -1449,7 +1449,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
     for (; Field != FieldEnd && !hadError; ++Field) {
       if (!Field->isUnnamedBitfield())
         CheckValueInitializable(
-            InitializedEntity::InitializeMember(&*Field, &Entity));
+            InitializedEntity::InitializeMember(*Field, &Entity));
     }
   }
 
@@ -1457,7 +1457,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
       Index >= IList->getNumInits())
     return;
 
-  if (CheckFlexibleArrayInit(Entity, IList->getInit(Index), &*Field,
+  if (CheckFlexibleArrayInit(Entity, IList->getInit(Index), *Field,
                              TopLevelObject)) {
     hadError = true;
     ++Index;
@@ -1465,7 +1465,7 @@ void InitListChecker::CheckStructUnionTypes(const InitializedEntity &Entity,
   }
 
   InitializedEntity MemberEntity =
-    InitializedEntity::InitializeMember(&*Field, &Entity);
+    InitializedEntity::InitializeMember(*Field, &Entity);
 
   if (isa<InitListExpr>(IList->getInit(Index)))
     CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
@@ -1679,7 +1679,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       // IndirectFieldDecl that follow for the designated initializer.
       if (!KnownField && Field->isAnonymousStructOrUnion()) {
         if (IndirectFieldDecl *IF =
-            FindIndirectFieldDesignator(&*Field, FieldName)) {
+            FindIndirectFieldDesignator(*Field, FieldName)) {
           // In verify mode, don't modify the original.
           if (VerifyOnly)
             DIE = CloneDesignatedInitExpr(SemaRef, DIE);
@@ -1688,7 +1688,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
           break;
         }
       }
-      if (KnownField && KnownField == &*Field)
+      if (KnownField && KnownField == *Field)
         break;
       if (FieldName && FieldName == Field->getIdentifier())
         break;
@@ -1757,7 +1757,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
           if (Field->isUnnamedBitfield())
             continue;
 
-          if (ReplacementField == &*Field ||
+          if (ReplacementField == *Field ||
               Field->getIdentifier() == ReplacementField->getIdentifier())
             break;
 
@@ -1771,15 +1771,15 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
     if (RT->getDecl()->isUnion()) {
       FieldIndex = 0;
       if (!VerifyOnly)
-        StructuredList->setInitializedFieldInUnion(&*Field);
+        StructuredList->setInitializedFieldInUnion(*Field);
     }
 
     // Make sure we can use this declaration.
     bool InvalidUse;
     if (VerifyOnly)
-      InvalidUse = !SemaRef.CanUseDecl(&*Field);
+      InvalidUse = !SemaRef.CanUseDecl(*Field);
     else
-      InvalidUse = SemaRef.DiagnoseUseOfDecl(&*Field, D->getFieldLoc());
+      InvalidUse = SemaRef.DiagnoseUseOfDecl(*Field, D->getFieldLoc());
     if (InvalidUse) {
       ++Index;
       return true;
@@ -1787,7 +1787,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
 
     if (!VerifyOnly) {
       // Update the designator with the field declaration.
-      D->setField(&*Field);
+      D->setField(*Field);
 
       // Make sure that our non-designated initializer list has space
       // for a subobject corresponding to this field.
@@ -1809,7 +1809,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
             << SourceRange(NextD->getStartLocation(),
                            DIE->getSourceRange().getEnd());
           SemaRef.Diag(Field->getLocation(), diag::note_flexible_array_member)
-            << &*Field;
+            << *Field;
         }
         Invalid = true;
       }
@@ -1822,13 +1822,13 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
                         diag::err_flexible_array_init_needs_braces)
             << DIE->getInit()->getSourceRange();
           SemaRef.Diag(Field->getLocation(), diag::note_flexible_array_member)
-            << &*Field;
+            << *Field;
         }
         Invalid = true;
       }
 
       // Check GNU flexible array initializer.
-      if (!Invalid && CheckFlexibleArrayInit(Entity, DIE->getInit(), &*Field,
+      if (!Invalid && CheckFlexibleArrayInit(Entity, DIE->getInit(), *Field,
                                              TopLevelObject))
         Invalid = true;
 
@@ -1844,7 +1844,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       IList->setInit(Index, DIE->getInit());
 
       InitializedEntity MemberEntity =
-        InitializedEntity::InitializeMember(&*Field, &Entity);
+        InitializedEntity::InitializeMember(*Field, &Entity);
       CheckSubElementType(MemberEntity, IList, Field->getType(), Index,
                           StructuredList, newStructuredIndex);
 
@@ -1863,7 +1863,7 @@ InitListChecker::CheckDesignatedInitializer(const InitializedEntity &Entity,
       unsigned newStructuredIndex = FieldIndex;
 
       InitializedEntity MemberEntity =
-        InitializedEntity::InitializeMember(&*Field, &Entity);
+        InitializedEntity::InitializeMember(*Field, &Entity);
       if (CheckDesignatedInitializer(MemberEntity, IList, DIE, DesigIdx + 1,
                                      FieldType, 0, 0, Index,
                                      StructuredList, newStructuredIndex,
@@ -4408,7 +4408,7 @@ static SourceLocation getInitializationLoc(const InitializedEntity &Entity,
 /// \param T The type of the temporary object, which must either be
 /// the type of the initializer expression or a superclass thereof.
 ///
-/// \param Enter The entity being initialized.
+/// \param Entity The entity being initialized.
 ///
 /// \param CurInit The initializer expression.
 ///
@@ -4747,6 +4747,43 @@ PerformConstructorInitialization(Sema &S,
   return move(CurInit);
 }
 
+/// Determine whether the specified InitializedEntity definitely has a lifetime
+/// longer than the current full-expression. Conservatively returns false if
+/// it's unclear.
+static bool
+InitializedEntityOutlivesFullExpression(const InitializedEntity &Entity) {
+  const InitializedEntity *Top = &Entity;
+  while (Top->getParent())
+    Top = Top->getParent();
+
+  switch (Top->getKind()) {
+  case InitializedEntity::EK_Variable:
+  case InitializedEntity::EK_Result:
+  case InitializedEntity::EK_Exception:
+  case InitializedEntity::EK_Member:
+  case InitializedEntity::EK_New:
+  case InitializedEntity::EK_Base:
+  case InitializedEntity::EK_Delegating:
+    return true;
+
+  case InitializedEntity::EK_ArrayElement:
+  case InitializedEntity::EK_VectorElement:
+  case InitializedEntity::EK_BlockElement:
+  case InitializedEntity::EK_ComplexElement:
+    // Could not determine what the full initialization is. Assume it might not
+    // outlive the full-expression.
+    return false;
+
+  case InitializedEntity::EK_Parameter:
+  case InitializedEntity::EK_Temporary:
+  case InitializedEntity::EK_LambdaCapture:
+    // The entity being initialized might not outlive the full-expression.
+    return false;
+  }
+
+  llvm_unreachable("unknown entity kind");
+}
+
 ExprResult
 InitializationSequence::Perform(Sema &S,
                                 const InitializedEntity &Entity,
@@ -4824,6 +4861,18 @@ InitializationSequence::Perform(Sema &S,
     Expr *Init = Args.get()[0];
     S.Diag(Init->getLocStart(), diag::warn_cxx98_compat_reference_list_init)
       << Init->getSourceRange();
+  }
+
+  // Diagnose cases where we initialize a pointer to an array temporary, and the
+  // pointer obviously outlives the temporary.
+  if (Args.size() == 1 && Args.get()[0]->getType()->isArrayType() &&
+      Entity.getType()->isPointerType() &&
+      InitializedEntityOutlivesFullExpression(Entity)) {
+    Expr *Init = Args.get()[0];
+    Expr::LValueClassification Kind = Init->ClassifyLValue(S.Context);
+    if (Kind == Expr::LV_ClassTemporary || Kind == Expr::LV_ArrayTemporary)
+      S.Diag(Init->getLocStart(), diag::warn_temporary_array_to_pointer_decay)
+        << Init->getSourceRange();
   }
 
   QualType DestType = Entity.getType().getNonReferenceType();

@@ -582,7 +582,10 @@ void DeclPrinter::VisitFieldDecl(FieldDecl *D) {
 
   Expr *Init = D->getInClassInitializer();
   if (!Policy.SuppressInitializers && Init) {
-    Out << " = ";
+    if (D->getInClassInitStyle() == ICIS_ListInit)
+      Out << " ";
+    else
+      Out << " = ";
     Init->printPretty(Out, Context, 0, Policy, Indentation);
   }
   prettyPrintAttributes(D);
@@ -913,7 +916,7 @@ void DeclPrinter::VisitObjCInterfaceDecl(ObjCInterfaceDecl *OID) {
     Indentation += Policy.Indentation;
     for (ObjCInterfaceDecl::ivar_iterator I = OID->ivar_begin(),
          E = OID->ivar_end(); I != E; ++I) {
-      Indent() << I->getType().getAsString(Policy) << ' ' << *I << ";\n";
+      Indent() << I->getType().getAsString(Policy) << ' ' << **I << ";\n";
     }
     Indentation -= Policy.Indentation;
     Out << "}\n";

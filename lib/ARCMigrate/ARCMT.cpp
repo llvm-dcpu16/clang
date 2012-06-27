@@ -195,8 +195,19 @@ createInvocationForMigration(CompilerInvocation &origCI) {
   CInvok->getLangOpts()->ObjCAutoRefCount = true;
   CInvok->getLangOpts()->setGC(LangOptions::NonGC);
   CInvok->getDiagnosticOpts().ErrorLimit = 0;
-  CInvok->getDiagnosticOpts().Warnings.push_back(
-                                            "error=arc-unsafe-retained-assign");
+  CInvok->getDiagnosticOpts().PedanticErrors = 0;
+
+  // Ignore -Werror flags when migrating.
+  std::vector<std::string> WarnOpts;
+  for (std::vector<std::string>::iterator
+         I = CInvok->getDiagnosticOpts().Warnings.begin(),
+         E = CInvok->getDiagnosticOpts().Warnings.end(); I != E; ++I) {
+    if (!StringRef(*I).startswith("error"))
+      WarnOpts.push_back(*I);
+  }
+  WarnOpts.push_back("error=arc-unsafe-retained-assign");
+  CInvok->getDiagnosticOpts().Warnings = llvm_move(WarnOpts);
+
   CInvok->getLangOpts()->ObjCRuntimeHasWeak = HasARCRuntime(origCI);
 
   return CInvok.take();
@@ -480,13 +491,12 @@ public:
 
 class RewritesApplicator : public TransformActions::RewriteReceiver {
   Rewriter &rewriter;
-  ASTContext &Ctx;
   MigrationProcess::RewriteListener *Listener;
 
 public:
   RewritesApplicator(Rewriter &rewriter, ASTContext &ctx,
                      MigrationProcess::RewriteListener *listener)
-    : rewriter(rewriter), Ctx(ctx), Listener(listener) {
+    : rewriter(rewriter), Listener(listener) {
     if (Listener)
       Listener->start(ctx);
   }

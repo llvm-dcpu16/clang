@@ -655,7 +655,7 @@ void ASTDeclReader::VisitObjCMethodDecl(ObjCMethodDecl *MD) {
   MD->SetRelatedResultType(Record[Idx++]);
   MD->setResultType(Reader.readType(F, Record, Idx));
   MD->setResultTypeSourceInfo(GetTypeSourceInfo(Record, Idx));
-  MD->setEndLoc(ReadSourceLocation(Record, Idx));
+  MD->DeclEndLoc = ReadSourceLocation(Record, Idx);
   unsigned NumParams = Record[Idx++];
   SmallVector<ParmVarDecl *, 16> Params;
   Params.reserve(NumParams);
@@ -865,12 +865,11 @@ void ASTDeclReader::VisitObjCPropertyImplDecl(ObjCPropertyImplDecl *D) {
 
 void ASTDeclReader::VisitFieldDecl(FieldDecl *FD) {
   VisitDeclaratorDecl(FD);
-  FD->setMutable(Record[Idx++]);
-  int BitWidthOrInitializer = Record[Idx++];
-  if (BitWidthOrInitializer == 1)
-    FD->setBitWidth(Reader.ReadExpr(F));
-  else if (BitWidthOrInitializer == 2)
-    FD->setInClassInitializer(Reader.ReadExpr(F));
+  FD->Mutable = Record[Idx++];
+  if (int BitWidthOrInitializer = Record[Idx++]) {
+    FD->InitializerOrBitWidth.setInt(BitWidthOrInitializer - 1);
+    FD->InitializerOrBitWidth.setPointer(Reader.ReadExpr(F));
+  }
   if (!FD->getDeclName()) {
     if (FieldDecl *Tmpl = ReadDeclAs<FieldDecl>(Record, Idx))
       Reader.getContext().setInstantiatedFromUnnamedFieldDecl(FD, Tmpl);
@@ -1095,11 +1094,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
   Data.HasTrivialDefaultConstructor = Record[Idx++];
   Data.HasConstexprNonCopyMoveConstructor = Record[Idx++];
   Data.DefaultedDefaultConstructorIsConstexpr = Record[Idx++];
-  Data.DefaultedCopyConstructorIsConstexpr = Record[Idx++];
-  Data.DefaultedMoveConstructorIsConstexpr = Record[Idx++];
   Data.HasConstexprDefaultConstructor = Record[Idx++];
-  Data.HasConstexprCopyConstructor = Record[Idx++];
-  Data.HasConstexprMoveConstructor = Record[Idx++];
   Data.HasTrivialCopyConstructor = Record[Idx++];
   Data.HasTrivialMoveConstructor = Record[Idx++];
   Data.HasTrivialCopyAssignment = Record[Idx++];
@@ -1249,7 +1244,6 @@ void ASTDeclReader::VisitImportDecl(ImportDecl *D) {
   SourceLocation *StoredLocs = reinterpret_cast<SourceLocation *>(D + 1);
   for (unsigned I = 0, N = Record.back(); I != N; ++I)
     StoredLocs[I] = ReadSourceLocation(Record, Idx);
-  ++Idx;
 }
 
 void ASTDeclReader::VisitAccessSpecDecl(AccessSpecDecl *D) {
@@ -1535,7 +1529,7 @@ ASTDeclReader::VisitRedeclarable(Redeclarable<T> *D) {
     // We temporarily set the first (canonical) declaration as the previous one
     // which is the one that matters and mark the real previous DeclID to be
     // loaded & attached later on.
-    D->RedeclLink = typename Redeclarable<T>::PreviousDeclLink(FirstDecl);
+    D->RedeclLink = Redeclarable<T>::PreviousDeclLink(FirstDecl);
   }    
   
   // Note that this declaration has been deserialized.
@@ -1563,8 +1557,7 @@ void ASTDeclReader::mergeRedeclarable(Redeclarable<T> *D,
         // Have our redeclaration link point back at the canonical declaration
         // of the existing declaration, so that this declaration has the 
         // appropriate canonical declaration.
-        D->RedeclLink 
-          = typename Redeclarable<T>::PreviousDeclLink(ExistingCanon);
+        D->RedeclLink = Redeclarable<T>::PreviousDeclLink(ExistingCanon);
         
         // When we merge a namespace, update its pointer to the first namespace.
         if (NamespaceDecl *Namespace
@@ -1806,22 +1799,22 @@ ASTDeclReader::FindExistingResult ASTDeclReader::findExisting(NamedDecl *D) {
 void ASTDeclReader::attachPreviousDecl(Decl *D, Decl *previous) {
   assert(D && previous);
   if (TagDecl *TD = dyn_cast<TagDecl>(D)) {
-    TD->RedeclLink.setPointer(cast<TagDecl>(previous));
+    TD->RedeclLink.setNext(cast<TagDecl>(previous));
   } else if (FunctionDecl *FD = dyn_cast<FunctionDecl>(D)) {
-    FD->RedeclLink.setPointer(cast<FunctionDecl>(previous));
+    FD->RedeclLink.setNext(cast<FunctionDecl>(previous));
   } else if (VarDecl *VD = dyn_cast<VarDecl>(D)) {
-    VD->RedeclLink.setPointer(cast<VarDecl>(previous));
+    VD->RedeclLink.setNext(cast<VarDecl>(previous));
   } else if (TypedefNameDecl *TD = dyn_cast<TypedefNameDecl>(D)) {
-    TD->RedeclLink.setPointer(cast<TypedefNameDecl>(previous));
+    TD->RedeclLink.setNext(cast<TypedefNameDecl>(previous));
   } else if (ObjCInterfaceDecl *ID = dyn_cast<ObjCInterfaceDecl>(D)) {
-    ID->RedeclLink.setPointer(cast<ObjCInterfaceDecl>(previous));
+    ID->RedeclLink.setNext(cast<ObjCInterfaceDecl>(previous));
   } else if (ObjCProtocolDecl *PD = dyn_cast<ObjCProtocolDecl>(D)) {
-    PD->RedeclLink.setPointer(cast<ObjCProtocolDecl>(previous));
+    PD->RedeclLink.setNext(cast<ObjCProtocolDecl>(previous));
   } else if (NamespaceDecl *ND = dyn_cast<NamespaceDecl>(D)) {
-    ND->RedeclLink.setPointer(cast<NamespaceDecl>(previous));
+    ND->RedeclLink.setNext(cast<NamespaceDecl>(previous));
   } else {
     RedeclarableTemplateDecl *TD = cast<RedeclarableTemplateDecl>(D);
-    TD->RedeclLink.setPointer(cast<RedeclarableTemplateDecl>(previous));
+    TD->RedeclLink.setNext(cast<RedeclarableTemplateDecl>(previous));
   }
 }
 

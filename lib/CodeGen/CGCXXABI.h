@@ -38,7 +38,7 @@ namespace CodeGen {
   class CodeGenFunction;
   class CodeGenModule;
 
-/// Implements C++ ABI-specific code generation functions.
+/// \brief Implements C++ ABI-specific code generation functions.
 class CGCXXABI {
 protected:
   CodeGenModule &CGM;
@@ -196,15 +196,14 @@ public:
   /**************************** Array cookies ******************************/
 
   /// Returns the extra size required in order to store the array
-  /// cookie for the given type.  May return 0 to indicate that no
+  /// cookie for the given new-expression.  May return 0 to indicate that no
   /// array cookie is required.
   ///
   /// Several cases are filtered out before this method is called:
   ///   - non-array allocations never need a cookie
-  ///   - calls to ::operator new(size_t, void*) never need a cookie
+  ///   - calls to \::operator new(size_t, void*) never need a cookie
   ///
-  /// \param ElementType - the allocated type of the expression,
-  ///   i.e. the pointee type of the expression result type
+  /// \param expr - the new-expression being allocated.
   virtual CharUnits GetArrayCookieSize(const CXXNewExpr *expr);
 
   /// Initialize the array cookie for the given allocation.
@@ -251,7 +250,9 @@ protected:
   ///
   /// \param ptr - a pointer to the allocation made for an array, as a char*
   /// \param cookieSize - the computed cookie size of an array
+  ///
   /// Other parameters are as above.
+  ///
   /// \return a size_t
   virtual llvm::Value *readArrayCookieImpl(CodeGenFunction &IGF,
                                            llvm::Value *ptr,
@@ -279,6 +280,11 @@ public:
   /// \param addr - a pointer to pass to the destructor function.
   virtual void registerGlobalDtor(CodeGenFunction &CGF, llvm::Constant *dtor,
                                   llvm::Constant *addr);
+
+  /***************************** Virtual Tables *******************************/
+
+  /// Generates and emits the virtual tables for a class.
+  virtual void EmitVTables(const CXXRecordDecl *Class) = 0;
 };
 
 /// Creates an instance of a C++ ABI class.

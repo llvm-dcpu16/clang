@@ -660,7 +660,7 @@ framework search path. For consistency, we recommend that such files never be
 included in installed versions of the framework.</p>
 
 <!-- ======================================================================= -->
-<h2 id="availability">Availability attribute</h2
+<h2 id="availability">Availability attribute</h2>
 <!-- ======================================================================= -->
 
 <p>Clang introduces the <code>availability</code> attribute, which can
@@ -1200,6 +1200,16 @@ tests the availability of array literals;
 <code>__has_feature(objc_dictionary_literals)</code> tests the availability of
 dictionary literals; <code>__has_feature(objc_subscripting)</code> tests the
 availability of object subscripting.</p>
+
+<!-- ======================================================================= -->
+<h2 id="objc_default_synthesize_properties">Objective-C Autosynthesis of Properties</h2>
+<!-- ======================================================================= -->
+
+<p> Clang provides support for autosynthesis of declared properties. Using this
+feature, clang provides default synthesis of those properties not declared @dynamic
+and not having user provided backing getter and setter methods.
+<code>__has_feature(objc_default_synthesize_properties)</code> checks for availability
+of this feature in version of clang being used.</p>
 
 <!-- ======================================================================= -->
 <h2 id="overloading-in-c">Function Overloading in C</h2>

@@ -444,6 +444,13 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
   CXXScopeSpec SS;
   SourceLocation TypenameLoc;
   bool IsTypeName;
+  ParsedAttributesWithRange attrs(AttrFactory);
+
+  // FIXME: Simply skip the attributes and diagnose, don't bother parsing them.
+  MaybeParseCXX0XAttributes(attrs);
+  ProhibitAttributes(attrs);
+  attrs.clear();
+  attrs.Range = SourceRange();
 
   // Ignore optional 'typename'.
   // FIXME: This is wrong; we should parse this as a typename-specifier.
@@ -480,7 +487,7 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
     return 0;
   }
 
-  ParsedAttributes attrs(AttrFactory);
+  MaybeParseCXX0XAttributes(attrs);
 
   // Maybe this is an alias-declaration.
   bool IsAliasDecl = Tok.is(tok::equal);
@@ -533,9 +540,14 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
     TypeAlias = ParseTypeName(0, TemplateInfo.Kind ?
                               Declarator::AliasTemplateContext :
                               Declarator::AliasDeclContext, AS, OwnedType);
-  } else
+  } else {
+    // C++11 attributes are not allowed on a using-declaration, but GNU ones
+    // are.
+    ProhibitAttributes(attrs);
+
     // Parse (optional) attributes (most likely GNU strong-using extension).
     MaybeParseGNUAttributes(attrs);
+  }
 
   // Eat ';'.
   DeclEnd = Tok.getLocation();
@@ -572,6 +584,7 @@ Decl *Parser::ParseUsingDeclaration(unsigned Context,
     MultiTemplateParamsArg TemplateParamsArg(Actions,
       TemplateParams ? TemplateParams->data() : 0,
       TemplateParams ? TemplateParams->size() : 0);
+    // FIXME: Propagate attributes.
     return Actions.ActOnAliasDeclaration(getCurScope(), AS, TemplateParamsArg,
                                          UsingLoc, Name, TypeAlias);
   }
@@ -874,10 +887,12 @@ Parser::TypeResult Parser::ParseBaseTypeSpecifier(SourceLocation &BaseLoc,
   }
 
   // We have an identifier; check whether it is actually a type.
+  IdentifierInfo *CorrectedII = 0;
   ParsedType Type = Actions.getTypeName(*Id, IdLoc, getCurScope(), &SS, true,
                                         false, ParsedType(),
                                         /*IsCtorOrDtorName=*/false,
-                                        /*NonTrivialTypeSourceInfo=*/true);
+                                        /*NonTrivialTypeSourceInfo=*/true,
+                                        &CorrectedII);
   if (!Type) {
     Diag(IdLoc, diag::err_expected_class_name);
     return true;
@@ -898,6 +913,75 @@ Parser::TypeResult Parser::ParseBaseTypeSpecifier(SourceLocation &BaseLoc,
 
   Declarator DeclaratorInfo(DS, Declarator::TypeNameContext);
   return Actions.ActOnTypeName(getCurScope(), DeclaratorInfo);
+}
+
+void Parser::ParseMicrosoftInheritanceClassAttributes(ParsedAttributes &attrs) {
+  while (Tok.is(tok::kw___single_inheritance) ||
+         Tok.is(tok::kw___multiple_inheritance) ||
+         Tok.is(tok::kw___virtual_inheritance)) {
+    IdentifierInfo *AttrName = Tok.getIdentifierInfo();
+    SourceLocation AttrNameLoc = ConsumeToken();
+    attrs.addNew(AttrName, AttrNameLoc, 0, AttrNameLoc, 0,
+                 SourceLocation(), 0, 0, AttributeList::AS_GNU);
+  }
+}
+
+/// Determine whether the following tokens are valid after a type-specifier
+/// which could be a standalone declaration. This will conservatively return
+/// true if there's any doubt, and is appropriate for insert-';' fixits.
+bool Parser::isValidAfterTypeSpecifier() {
+  // This switch enumerates the valid "follow" set for type-specifiers.
+  switch (Tok.getKind()) {
+  default: break;
+  case tok::semi:               // struct foo {...} ;
+  case tok::star:               // struct foo {...} *         P;
+  case tok::amp:                // struct foo {...} &         R = ...
+  case tok::identifier:         // struct foo {...} V         ;
+  case tok::r_paren:            //(struct foo {...} )         {4}
+  case tok::annot_cxxscope:     // struct foo {...} a::       b;
+  case tok::annot_typename:     // struct foo {...} a         ::b;
+  case tok::annot_template_id:  // struct foo {...} a<int>    ::b;
+  case tok::l_paren:            // struct foo {...} (         x);
+  case tok::comma:              // __builtin_offsetof(struct foo{...} ,
+    return true;
+  // Type qualifiers
+  case tok::kw_const:           // struct foo {...} const     x;
+  case tok::kw_volatile:        // struct foo {...} volatile  x;
+  case tok::kw_restrict:        // struct foo {...} restrict  x;
+  case tok::kw_inline:          // struct foo {...} inline    foo() {};
+  // Storage-class specifiers
+  case tok::kw_static:          // struct foo {...} static    x;
+  case tok::kw_extern:          // struct foo {...} extern    x;
+  case tok::kw_typedef:         // struct foo {...} typedef   x;
+  case tok::kw_register:        // struct foo {...} register  x;
+  case tok::kw_auto:            // struct foo {...} auto      x;
+  case tok::kw_mutable:         // struct foo {...} mutable   x;
+  case tok::kw_constexpr:       // struct foo {...} constexpr x;
+    // As shown above, type qualifiers and storage class specifiers absolutely
+    // can occur after class specifiers according to the grammar.  However,
+    // almost no one actually writes code like this.  If we see one of these,
+    // it is much more likely that someone missed a semi colon and the
+    // type/storage class specifier we're seeing is part of the *next*
+    // intended declaration, as in:
+    //
+    //   struct foo { ... }
+    //   typedef int X;
+    //
+    // We'd really like to emit a missing semicolon error instead of emitting
+    // an error on the 'int' saying that you can't have two type specifiers in
+    // the same declaration of X.  Because of this, we look ahead past this
+    // token to see if it's a type specifier.  If so, we know the code is
+    // otherwise invalid, so we can produce the expected semi error.
+    if (!isKnownToBeTypeSpecifier(NextToken()))
+      return true;
+    break;
+  case tok::r_brace:  // struct bar { struct foo {...} }
+    // Missing ';' at end of struct is accepted as an extension in C mode.
+    if (!getLangOpts().CPlusPlus)
+      return true;
+    break;
+  }
+  return false;
 }
 
 /// ParseClassSpecifier - Parse a C++ class-specifier [C++ class] or
@@ -976,7 +1060,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
      TemplateInfo.Kind == ParsedTemplateInfo::ExplicitSpecialization);
   SuppressAccessChecks diagsFromTag(*this, shouldDelayDiagsInTag);
 
-  ParsedAttributes attrs(AttrFactory);
+  ParsedAttributesWithRange attrs(AttrFactory);
   // If attributes exist after tag, parse them.
   if (Tok.is(tok::kw___attribute))
     ParseGNUAttributes(attrs);
@@ -984,6 +1068,12 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   // If declspecs exist after tag, parse them.
   while (Tok.is(tok::kw___declspec))
     ParseMicrosoftDeclSpec(attrs);
+
+  // Parse inheritance specifiers.
+  if (Tok.is(tok::kw___single_inheritance) ||
+      Tok.is(tok::kw___multiple_inheritance) ||
+      Tok.is(tok::kw___virtual_inheritance))
+      ParseMicrosoftInheritanceClassAttributes(attrs);
 
   // If C++0x attributes exist here, parse them.
   // FIXME: Are we consistent with the ordering of parsing of different
@@ -1144,9 +1234,19 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
       // Okay, this is a class definition.
       TUK = Sema::TUK_Definition;
     }
-  } else if (Tok.is(tok::semi) && DSC != DSC_type_specifier)
+  } else if (DSC != DSC_type_specifier &&
+             (Tok.is(tok::semi) ||
+              (Tok.isAtStartOfLine() && !isValidAfterTypeSpecifier()))) {
     TUK = DS.isFriendSpecified() ? Sema::TUK_Friend : Sema::TUK_Declaration;
-  else
+    if (Tok.isNot(tok::semi)) {
+      // A semicolon was missing after this declaration. Diagnose and recover.
+      ExpectAndConsume(tok::semi, diag::err_expected_semi_after_tagdecl,
+                       TagType == DeclSpec::TST_class ? "class" :
+                       TagType == DeclSpec::TST_struct ? "struct" : "union");
+      PP.EnterToken(Tok);
+      Tok.setKind(tok::semi);
+    }
+  } else
     TUK = Sema::TUK_Reference;
 
   // If this is an elaborated type specifier, and we delayed
@@ -1183,6 +1283,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     if (TemplateInfo.Kind == ParsedTemplateInfo::ExplicitInstantiation &&
         TUK == Sema::TUK_Declaration) {
       // This is an explicit instantiation of a class template.
+      ProhibitAttributes(attrs);
+
       TagOrTempResult
         = Actions.ActOnExplicitInstantiation(getCurScope(),
                                              TemplateInfo.ExternLoc,
@@ -1204,6 +1306,7 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     } else if (TUK == Sema::TUK_Reference ||
                (TUK == Sema::TUK_Friend &&
                 TemplateInfo.Kind == ParsedTemplateInfo::NonTemplate)) {
+      ProhibitAttributes(attrs);
       TypeResult = Actions.ActOnTagTemplateIdType(TUK, TagType, StartLoc,
                                                   TemplateId->SS,
                                                   TemplateId->TemplateKWLoc,
@@ -1268,6 +1371,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
     //
     //   template struct Outer<int>::Inner;
     //
+    ProhibitAttributes(attrs);
+
     TagOrTempResult
       = Actions.ActOnExplicitInstantiation(getCurScope(),
                                            TemplateInfo.ExternLoc,
@@ -1276,6 +1381,8 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
                                            NameLoc, attrs.getList());
   } else if (TUK == Sema::TUK_Friend &&
              TemplateInfo.Kind != ParsedTemplateInfo::NonTemplate) {
+    ProhibitAttributes(attrs);
+
     TagOrTempResult =
       Actions.ActOnTemplatedFriendTag(getCurScope(), DS.getFriendSpecLoc(),
                                       TagType, StartLoc, SS,
@@ -1288,6 +1395,9 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
         TUK == Sema::TUK_Definition) {
       // FIXME: Diagnose this particular error.
     }
+
+    if (TUK != Sema::TUK_Declaration && TUK != Sema::TUK_Definition)
+      ProhibitAttributes(attrs);
 
     bool IsDependent = false;
 
@@ -1352,77 +1462,19 @@ void Parser::ParseClassSpecifier(tok::TokenKind TagTokKind,
   // impossible token occurs next, we assume that the programmer forgot a ; at
   // the end of the declaration and recover that way.
   //
-  // This switch enumerates the valid "follow" set for definition.
-  if (TUK == Sema::TUK_Definition) {
-    bool ExpectedSemi = true;
-    switch (Tok.getKind()) {
-    default: break;
-    case tok::semi:               // struct foo {...} ;
-    case tok::star:               // struct foo {...} *         P;
-    case tok::amp:                // struct foo {...} &         R = ...
-    case tok::identifier:         // struct foo {...} V         ;
-    case tok::r_paren:            //(struct foo {...} )         {4}
-    case tok::annot_cxxscope:     // struct foo {...} a::       b;
-    case tok::annot_typename:     // struct foo {...} a         ::b;
-    case tok::annot_template_id:  // struct foo {...} a<int>    ::b;
-    case tok::l_paren:            // struct foo {...} (         x);
-    case tok::comma:              // __builtin_offsetof(struct foo{...} ,
-      ExpectedSemi = false;
-      break;
-    // Type qualifiers
-    case tok::kw_const:           // struct foo {...} const     x;
-    case tok::kw_volatile:        // struct foo {...} volatile  x;
-    case tok::kw_restrict:        // struct foo {...} restrict  x;
-    case tok::kw_inline:          // struct foo {...} inline    foo() {};
-    // Storage-class specifiers
-    case tok::kw_static:          // struct foo {...} static    x;
-    case tok::kw_extern:          // struct foo {...} extern    x;
-    case tok::kw_typedef:         // struct foo {...} typedef   x;
-    case tok::kw_register:        // struct foo {...} register  x;
-    case tok::kw_auto:            // struct foo {...} auto      x;
-    case tok::kw_mutable:         // struct foo {...} mutable   x;
-    case tok::kw_constexpr:       // struct foo {...} constexpr x;
-      // As shown above, type qualifiers and storage class specifiers absolutely
-      // can occur after class specifiers according to the grammar.  However,
-      // almost no one actually writes code like this.  If we see one of these,
-      // it is much more likely that someone missed a semi colon and the
-      // type/storage class specifier we're seeing is part of the *next*
-      // intended declaration, as in:
-      //
-      //   struct foo { ... }
-      //   typedef int X;
-      //
-      // We'd really like to emit a missing semicolon error instead of emitting
-      // an error on the 'int' saying that you can't have two type specifiers in
-      // the same declaration of X.  Because of this, we look ahead past this
-      // token to see if it's a type specifier.  If so, we know the code is
-      // otherwise invalid, so we can produce the expected semi error.
-      if (!isKnownToBeTypeSpecifier(NextToken()))
-        ExpectedSemi = false;
-      break;
-
-    case tok::r_brace:  // struct bar { struct foo {...} }
-      // Missing ';' at end of struct is accepted as an extension in C mode.
-      if (!getLangOpts().CPlusPlus)
-        ExpectedSemi = false;
-      break;
-    }
-
-    // C++ [temp]p3 In a template-declaration which defines a class, no
-    // declarator is permitted.
-    if (TemplateInfo.Kind)
-      ExpectedSemi = true;
-
-    if (ExpectedSemi) {
-      ExpectAndConsume(tok::semi, diag::err_expected_semi_after_tagdecl,
-                       TagType == DeclSpec::TST_class ? "class"
-                       : TagType == DeclSpec::TST_struct? "struct" : "union");
-      // Push this token back into the preprocessor and change our current token
-      // to ';' so that the rest of the code recovers as though there were an
-      // ';' after the definition.
-      PP.EnterToken(Tok);
-      Tok.setKind(tok::semi);
-    }
+  // Also enforce C++ [temp]p3:
+  //   In a template-declaration which defines a class, no declarator
+  //   is permitted.
+  if (TUK == Sema::TUK_Definition &&
+      (TemplateInfo.Kind || !isValidAfterTypeSpecifier())) {
+    ExpectAndConsume(tok::semi, diag::err_expected_semi_after_tagdecl,
+                     TagType == DeclSpec::TST_class ? "class" :
+                     TagType == DeclSpec::TST_struct ? "struct" : "union");
+    // Push this token back into the preprocessor and change our current token
+    // to ';' so that the rest of the code recovers as though there were an
+    // ';' after the definition.
+    PP.EnterToken(Tok);
+    Tok.setKind(tok::semi);
   }
 }
 
@@ -1929,9 +1981,8 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
       LateParsedAttrs.clear();
 
       // Consume the ';' - it's optional unless we have a delete or default
-      if (Tok.is(tok::semi)) {
-        ConsumeToken();
-      }
+      if (Tok.is(tok::semi))
+        ConsumeExtraSemi(AfterDefinition);
 
       return;
     }
@@ -1975,18 +2026,19 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     // goes before or after the GNU attributes and __asm__.
     ParseOptionalCXX0XVirtSpecifierSeq(VS);
 
-    bool HasDeferredInitializer = false;
+    InClassInitStyle HasInClassInit = ICIS_NoInit;
     if ((Tok.is(tok::equal) || Tok.is(tok::l_brace)) && !HasInitializer) {
       if (BitfieldSize.get()) {
         Diag(Tok, diag::err_bitfield_member_init);
         SkipUntil(tok::comma, true, true);
       } else {
         HasInitializer = true;
-        HasDeferredInitializer = !DeclaratorInfo.isDeclarationOfFunction() &&
-          DeclaratorInfo.getDeclSpec().getStorageClassSpec()
-            != DeclSpec::SCS_static &&
-          DeclaratorInfo.getDeclSpec().getStorageClassSpec()
-            != DeclSpec::SCS_typedef;
+        if (!DeclaratorInfo.isDeclarationOfFunction() &&
+            DeclaratorInfo.getDeclSpec().getStorageClassSpec()
+              != DeclSpec::SCS_static &&
+            DeclaratorInfo.getDeclSpec().getStorageClassSpec()
+              != DeclSpec::SCS_typedef)
+          HasInClassInit = Tok.is(tok::equal) ? ICIS_CopyInit : ICIS_ListInit;
       }
     }
 
@@ -2004,7 +2056,7 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
                                                   DeclaratorInfo,
                                                   move(TemplateParams),
                                                   BitfieldSize.release(),
-                                                  VS, HasDeferredInitializer);
+                                                  VS, HasInClassInit);
       if (AccessAttrs)
         Actions.ProcessDeclAttributeList(getCurScope(), ThisDecl, AccessAttrs,
                                          false, true);
@@ -2020,15 +2072,15 @@ void Parser::ParseCXXClassMemberDeclaration(AccessSpecifier AS,
     LateParsedAttrs.clear();
 
     // Handle the initializer.
-    if (HasDeferredInitializer) {
+    if (HasInClassInit != ICIS_NoInit) {
       // The initializer was deferred; parse it and cache the tokens.
       Diag(Tok, getLangOpts().CPlusPlus0x ?
            diag::warn_cxx98_compat_nonstatic_member_init :
            diag::ext_nonstatic_member_init);
 
       if (DeclaratorInfo.isArrayOfUnknownBound()) {
-        // C++0x [dcl.array]p3: An array bound may also be omitted when the
-        // declarator is followed by an initializer. 
+        // C++11 [dcl.array]p3: An array bound may also be omitted when the
+        // declarator is followed by an initializer.
         //
         // A brace-or-equal-initializer for a member-declarator is not an
         // initializer in the grammar, so this is ill-formed.
@@ -2280,10 +2332,8 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
 
       // Check for extraneous top-level semicolon.
       if (Tok.is(tok::semi)) {
-        Diag(Tok, diag::ext_extra_struct_semi)
-          << DeclSpec::getSpecifierName((DeclSpec::TST)TagType)
-          << FixItHint::CreateRemoval(Tok.getLocation());
-        ConsumeToken();
+        ConsumeExtraSemi(InsideStruct,
+                         DeclSpec::getSpecifierName((DeclSpec::TST)TagType));
         continue;
       }
 
@@ -2884,13 +2934,14 @@ void Parser::ParseCXX11AttributeSpecifier(ParsedAttributes &attrs,
     }
 
     bool AttrParsed = false;
-    switch (AttributeList::getKind(AttrName, ScopeName)) {
+    switch (AttributeList::getKind(AttrName, ScopeName,
+                                   AttributeList::AS_CXX11)) {
     // No arguments
-    case AttributeList::AT_carries_dependency:
+    case AttributeList::AT_CarriesDependency:
     // FIXME: implement generic support of attributes with C++11 syntax
     // see Parse/ParseDecl.cpp: ParseGNUAttributes
-    case AttributeList::AT_clang___fallthrough:
-    case AttributeList::AT_noreturn: {
+    case AttributeList::AT_FallThrough:
+    case AttributeList::AT_NoReturn: {
       if (Tok.is(tok::l_paren)) {
         Diag(Tok.getLocation(), diag::err_cxx11_attribute_forbids_arguments)
           << AttrName->getName();
@@ -2901,7 +2952,7 @@ void Parser::ParseCXX11AttributeSpecifier(ParsedAttributes &attrs,
                    SourceRange(ScopeLoc.isValid() ? ScopeLoc : AttrLoc,
                                AttrLoc),
                    ScopeName, ScopeLoc, 0,
-                   SourceLocation(), 0, 0, false, true);
+                   SourceLocation(), 0, 0, AttributeList::AS_CXX11);
       AttrParsed = true;
       break;
     }
@@ -2933,7 +2984,7 @@ void Parser::ParseCXX11AttributeSpecifier(ParsedAttributes &attrs,
     SkipUntil(tok::r_square, false);
 }
 
-/// ParseCXX11Attributes - Parse a C++0x attribute-specifier-seq.
+/// ParseCXX11Attributes - Parse a C++11 attribute-specifier-seq.
 ///
 /// attribute-specifier-seq:
 ///       attribute-specifier-seq[opt] attribute-specifier
@@ -3007,10 +3058,8 @@ void Parser::ParseMicrosoftIfExistsClassDeclaration(DeclSpec::TST TagType,
 
     // Check for extraneous top-level semicolon.
     if (Tok.is(tok::semi)) {
-      Diag(Tok, diag::ext_extra_struct_semi)
-        << DeclSpec::getSpecifierName((DeclSpec::TST)TagType)
-        << FixItHint::CreateRemoval(Tok.getLocation());
-      ConsumeToken();
+      ConsumeExtraSemi(InsideStruct,
+                       DeclSpec::getSpecifierName((DeclSpec::TST)TagType));
       continue;
     }
 

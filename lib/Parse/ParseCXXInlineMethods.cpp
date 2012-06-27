@@ -46,7 +46,7 @@ Decl *Parser::ParseCXXInlineMethodDef(AccessSpecifier AS,
   else {
     FnD = Actions.ActOnCXXMemberDeclarator(getCurScope(), AS, D,
                                            move(TemplateParams), 0, 
-                                           VS, /*HasDeferredInit=*/false);
+                                           VS, ICIS_NoInit);
     if (FnD) {
       Actions.ProcessDeclAttributeList(getCurScope(), FnD, AccessAttrs,
                                        false, true);
@@ -459,7 +459,7 @@ void Parser::ParseLexedMemberInitializers(ParsingClass &Class) {
     Actions.ActOnStartDelayedMemberDeclarations(getCurScope(),
                                                 Class.TagOrTemplate);
 
-  {
+  if (!Class.LateParsedDeclarations.empty()) {
     // C++11 [expr.prim.general]p4:
     //   Otherwise, if a member-declarator declares a non-static data member 
     //  (9.2) of a class X, the expression this is a prvalue of type "pointer
@@ -493,7 +493,7 @@ void Parser::ParseLexedMemberInitializer(LateParsedMemberInitializer &MI) {
   ConsumeAnyToken();
 
   SourceLocation EqualLoc;
-    
+
   ExprResult Init = ParseCXXMemberInitializer(MI.Field, /*IsFunction=*/false, 
                                               EqualLoc);
 

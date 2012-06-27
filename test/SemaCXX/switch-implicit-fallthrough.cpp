@@ -33,6 +33,8 @@ int fallthrough(int n) {
       }
     case 6:  // expected-warning{{unannotated fall-through between switch labels}} expected-note{{insert '[[clang::fallthrough]];' to silence this warning}} expected-note{{insert 'break;' to avoid fall-through}}
       n += 300;
+    case 66:  // expected-warning{{unannotated fall-through between switch labels}} expected-note{{insert 'break;' to avoid fall-through}}
+      break;
   }
   switch (n / 20) {
     case 7:
@@ -154,6 +156,24 @@ int fallthrough_position(int n) {
     case 223:          // expected-warning{{unannotated fall-through between switch labels}} expected-note{{insert '[[clang::fallthrough]];' to silence this warning}} expected-note{{insert 'break;' to avoid fall-through}}
       [[clang::fallthrough]]; // expected-warning{{fallthrough annotation does not directly precede switch label}}
   }
+
+  // TODO: uncomment this test after CFG gets more options to deal with
+  // unreachable code:
+  // http://lists.cs.uiuc.edu/pipermail/cfe-commits/Week-of-Mon-20120507/057370.html
+#if 0
+  long p = static_cast<long>(n) * n;
+  switch (sizeof(p)) {
+    case 9:                    // this test will not work on compilers with 72-bit long
+      n += static_cast<int>(p >> 32);
+      [[clang::fallthrough]];  // no warning here
+    case 5:                    // it is not intended to work on compilers with 40-bit long as well
+      n += static_cast<int>(p);
+      break;
+    default:
+     break;
+  }
+#endif
+
   return n;
 }
 

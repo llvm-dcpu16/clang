@@ -21,6 +21,7 @@
 #include "TargetInfo.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclObjC.h"
+#include "clang/Basic/ConvertUTF.h"
 #include "clang/Frontend/CodeGenOptions.h"
 #include "llvm/Intrinsics.h"
 #include "llvm/LLVMContext.h"
@@ -157,7 +158,11 @@ namespace {
 /// \brief An adjustment to be made to the temporary created when emitting a
 /// reference binding, which accesses a particular subobject of that temporary.
   struct SubobjectAdjustment {
-    enum { DerivedToBaseAdjustment, FieldAdjustment } Kind;
+    enum {
+      DerivedToBaseAdjustment,
+      FieldAdjustment,
+      MemberPointerAdjustment
+    } Kind;
 
     union {
       struct {
@@ -166,6 +171,11 @@ namespace {
       } DerivedToBase;
 
       FieldDecl *Field;
+
+      struct {
+        const MemberPointerType *MPT;
+        llvm::Value *Ptr;
+      } Ptr;
     };
 
     SubobjectAdjustment(const CastExpr *BasePath,
@@ -178,6 +188,12 @@ namespace {
     SubobjectAdjustment(FieldDecl *Field)
       : Kind(FieldAdjustment) {
       this->Field = Field;
+    }
+
+    SubobjectAdjustment(const MemberPointerType *MPT, llvm::Value *Ptr)
+      : Kind(MemberPointerAdjustment) {
+      this->Ptr.MPT = MPT;
+      this->Ptr.Ptr = Ptr;
     }
   };
 }
@@ -346,6 +362,15 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
             continue;
           }
         }
+      } else if (const BinaryOperator *BO = dyn_cast<BinaryOperator>(E)) {
+        if (BO->isPtrMemOp()) {
+          assert(BO->getLHS()->isRValue());
+          E = BO->getLHS();
+          const MemberPointerType *MPT =
+              BO->getRHS()->getType()->getAs<MemberPointerType>();
+          llvm::Value *Ptr = CGF.EmitScalarExpr(BO->getRHS());
+          Adjustments.push_back(SubobjectAdjustment(MPT, Ptr));
+        }
       }
 
       if (const OpaqueValueExpr *opaque = dyn_cast<OpaqueValueExpr>(E))
@@ -418,6 +443,11 @@ EmitExprForReferenceBinding(CodeGenFunction &CGF, const Expr *E,
           break;
         }
 
+        case SubobjectAdjustment::MemberPointerAdjustment: {
+          Object = CGF.CGM.getCXXABI().EmitMemberDataPointerAddress(
+                        CGF, Object, Adjustment.Ptr.Ptr, Adjustment.Ptr.MPT);
+          break;
+        }
         }
       }
 
@@ -518,7 +548,7 @@ unsigned CodeGenFunction::getAccessedFieldNo(unsigned Idx,
 }
 
 void CodeGenFunction::EmitCheck(llvm::Value *Address, unsigned Size) {
-  if (BoundsChecking <= 0)
+  if (!CatchUndefined)
     return;
 
   // This needs to be to the standard address space.
@@ -527,8 +557,7 @@ void CodeGenFunction::EmitCheck(llvm::Value *Address, unsigned Size) {
   llvm::Value *F = CGM.getIntrinsic(llvm::Intrinsic::objectsize, IntPtrTy);
 
   llvm::Value *Min = Builder.getFalse();
-  llvm::Value *Runtime = Builder.getInt32(BoundsChecking);
-  llvm::Value *C = Builder.CreateCall3(F, Address, Min, Runtime);
+  llvm::Value *C = Builder.CreateCall2(F, Address, Min);
   llvm::BasicBlock *Cont = createBasicBlock();
   Builder.CreateCondBr(Builder.CreateICmpUGE(C,
                                         llvm::ConstantInt::get(IntPtrTy, Size)),
@@ -672,10 +701,7 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
   case Expr::PseudoObjectExprClass:
     return EmitPseudoObjectLValue(cast<PseudoObjectExpr>(E));
   case Expr::InitListExprClass:
-    assert(cast<InitListExpr>(E)->getNumInits() == 1 &&
-           "Only single-element init list can be lvalue.");
-    return EmitLValue(cast<InitListExpr>(E)->getInit(0));
-
+    return EmitInitListLValue(cast<InitListExpr>(E));
   case Expr::CXXTemporaryObjectExprClass:
   case Expr::CXXConstructExprClass:
     return EmitCXXConstructLValue(cast<CXXConstructExpr>(E));
@@ -1677,6 +1703,73 @@ LValue CodeGenFunction::EmitObjCEncodeExprLValue(const ObjCEncodeExpr *E) {
                         E->getType());
 }
 
+static llvm::Constant*
+GetAddrOfConstantWideString(StringRef Str,
+                            const char *GlobalName,
+                            ASTContext &Context,
+                            QualType Ty, SourceLocation Loc,
+                            CodeGenModule &CGM) {
+
+  StringLiteral *SL = StringLiteral::Create(Context,
+                                            Str,
+                                            StringLiteral::Wide,
+                                            /*Pascal = */false,
+                                            Ty, Loc);
+  llvm::Constant *C = CGM.GetConstantArrayFromStringLiteral(SL);
+  llvm::GlobalVariable *GV =
+    new llvm::GlobalVariable(CGM.getModule(), C->getType(),
+                             !CGM.getLangOpts().WritableStrings,
+                             llvm::GlobalValue::PrivateLinkage,
+                             C, GlobalName);
+  const unsigned WideAlignment =
+    Context.getTypeAlignInChars(Ty).getQuantity();
+  GV->setAlignment(WideAlignment);
+  return GV;
+}
+
+// FIXME: Mostly copied from StringLiteralParser::CopyStringFragment
+static void ConvertUTF8ToWideString(unsigned CharByteWidth, StringRef Source,
+                                    SmallString<32>& Target) {
+  Target.resize(CharByteWidth * (Source.size() + 1));
+  char* ResultPtr = &Target[0];
+
+  assert(CharByteWidth==1 || CharByteWidth==2 || CharByteWidth==4);
+  ConversionResult result = conversionOK;
+  // Copy the character span over.
+  if (CharByteWidth == 1) {
+    if (!isLegalUTF8String(reinterpret_cast<const UTF8*>(&*Source.begin()),
+                           reinterpret_cast<const UTF8*>(&*Source.end())))
+      result = sourceIllegal;
+    memcpy(ResultPtr, Source.data(), Source.size());
+    ResultPtr += Source.size();
+  } else if (CharByteWidth == 2) {
+    UTF8 const *sourceStart = (UTF8 const *)Source.data();
+    // FIXME: Make the type of the result buffer correct instead of
+    // using reinterpret_cast.
+    UTF16 *targetStart = reinterpret_cast<UTF16*>(ResultPtr);
+    ConversionFlags flags = strictConversion;
+    result = ConvertUTF8toUTF16(
+      &sourceStart,sourceStart + Source.size(),
+        &targetStart,targetStart + 2*Source.size(),flags);
+    if (result==conversionOK)
+      ResultPtr = reinterpret_cast<char*>(targetStart);
+  } else if (CharByteWidth == 4) {
+    UTF8 const *sourceStart = (UTF8 const *)Source.data();
+    // FIXME: Make the type of the result buffer correct instead of
+    // using reinterpret_cast.
+    UTF32 *targetStart = reinterpret_cast<UTF32*>(ResultPtr);
+    ConversionFlags flags = strictConversion;
+    result = ConvertUTF8toUTF32(
+        &sourceStart,sourceStart + Source.size(),
+        &targetStart,targetStart + 4*Source.size(),flags);
+    if (result==conversionOK)
+      ResultPtr = reinterpret_cast<char*>(targetStart);
+  }
+  assert((result != targetExhausted)
+         && "ConvertUTF8toUTFXX exhausted target buffer");
+  assert(result == conversionOK);
+  Target.resize(ResultPtr - &Target[0]);
+}
 
 LValue CodeGenFunction::EmitPredefinedLValue(const PredefinedExpr *E) {
   switch (E->getIdentType()) {
@@ -1685,17 +1778,21 @@ LValue CodeGenFunction::EmitPredefinedLValue(const PredefinedExpr *E) {
 
   case PredefinedExpr::Func:
   case PredefinedExpr::Function:
+  case PredefinedExpr::LFunction:
   case PredefinedExpr::PrettyFunction: {
-    unsigned Type = E->getIdentType();
+    unsigned IdentType = E->getIdentType();
     std::string GlobalVarName;
 
-    switch (Type) {
+    switch (IdentType) {
     default: llvm_unreachable("Invalid type");
     case PredefinedExpr::Func:
       GlobalVarName = "__func__.";
       break;
     case PredefinedExpr::Function:
       GlobalVarName = "__FUNCTION__.";
+      break;
+    case PredefinedExpr::LFunction:
+      GlobalVarName = "L__FUNCTION__.";
       break;
     case PredefinedExpr::PrettyFunction:
       GlobalVarName = "__PRETTY_FUNCTION__.";
@@ -1714,10 +1811,27 @@ LValue CodeGenFunction::EmitPredefinedLValue(const PredefinedExpr *E) {
     std::string FunctionName =
         (isa<BlockDecl>(CurDecl)
          ? FnName.str()
-         : PredefinedExpr::ComputeName((PredefinedExpr::IdentType)Type, CurDecl));
+         : PredefinedExpr::ComputeName((PredefinedExpr::IdentType)IdentType,
+                                       CurDecl));
 
-    llvm::Constant *C =
-      CGM.GetAddrOfConstantCString(FunctionName, GlobalVarName.c_str());
+    const Type* ElemType = E->getType()->getArrayElementTypeNoTypeQual();
+    llvm::Constant *C;
+    if (ElemType->isWideCharType()) {
+      SmallString<32> RawChars;
+      ConvertUTF8ToWideString(
+          getContext().getTypeSizeInChars(ElemType).getQuantity(),
+          FunctionName, RawChars);
+      C = GetAddrOfConstantWideString(RawChars,
+                                      GlobalVarName.c_str(),
+                                      getContext(),
+                                      E->getType(),
+                                      E->getLocation(),
+                                      CGM);
+    } else {
+      C = CGM.GetAddrOfConstantCString(FunctionName,
+                                       GlobalVarName.c_str(),
+                                       1);
+    }
     return MakeAddrLValue(C, E->getType());
   }
   }
@@ -2119,7 +2233,10 @@ LValue CodeGenFunction::EmitCompoundLiteralLValue(const CompoundLiteralExpr *E){
     llvm::Value *GlobalPtr = CGM.GetAddrOfConstantCompoundLiteral(E);
     return MakeAddrLValue(GlobalPtr, E->getType());
   }
-
+  if (E->getType()->isVariablyModifiedType())
+    // make sure to emit the VLA size.
+    EmitVariablyModifiedType(E->getType());
+  
   llvm::Value *DeclPtr = CreateMemTemp(E->getType(), ".compoundliteral");
   const Expr *InitExpr = E->getInitializer();
   LValue Result = MakeAddrLValue(DeclPtr, E->getType());
@@ -2128,6 +2245,16 @@ LValue CodeGenFunction::EmitCompoundLiteralLValue(const CompoundLiteralExpr *E){
                    /*Init*/ true);
 
   return Result;
+}
+
+LValue CodeGenFunction::EmitInitListLValue(const InitListExpr *E) {
+  if (!E->isGLValue())
+    // Initializing an aggregate temporary in C++11: T{...}.
+    return EmitAggExprToLValue(E);
+
+  // An lvalue initializer list must be initializing a reference.
+  assert(E->getNumInits() == 1 && "reference init with multiple values");
+  return EmitLValue(E->getInit(0));
 }
 
 LValue CodeGenFunction::
@@ -2189,11 +2316,11 @@ EmitConditionalOperatorLValue(const AbstractConditionalOperator *expr) {
   return MakeAddrLValue(phi, expr->getType());
 }
 
-/// EmitCastLValue - Casts are never lvalues unless that cast is a dynamic_cast.
-/// If the cast is a dynamic_cast, we can have the usual lvalue result,
+/// EmitCastLValue - Casts are never lvalues unless that cast is to a reference
+/// type. If the cast is to a reference, we can have the usual lvalue result,
 /// otherwise if a cast is needed by the code generator in an lvalue context,
 /// then it must mean that we need the address of an aggregate in order to
-/// access one of its fields.  This can happen for all the reasons that casts
+/// access one of its members.  This can happen for all the reasons that casts
 /// are permitted with aggregate result, including noop aggregate casts, and
 /// cast from scalar to union.
 LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {

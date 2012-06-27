@@ -349,7 +349,7 @@ namespace {
     virtual void RewriteIvarOffsetComputation(ObjCIvarDecl *ivar,
                                          std::string &Result) = 0;
     
-    // Misc. AST transformation routines. Somtimes they end up calling
+    // Misc. AST transformation routines. Sometimes they end up calling
     // rewriting routines on the new ASTs.
     CallExpr *SynthesizeCallToFunctionDecl(FunctionDecl *FD,
                                            Expr **args, unsigned nargs,
@@ -967,7 +967,7 @@ void RewriteObjC::RewriteCategoryDecl(ObjCCategoryDecl *CatDecl) {
 
   for (ObjCCategoryDecl::prop_iterator I = CatDecl->prop_begin(),
        E = CatDecl->prop_end(); I != E; ++I)
-    RewriteProperty(&*I);
+    RewriteProperty(*I);
   
   for (ObjCCategoryDecl::instmeth_iterator
          I = CatDecl->instmeth_begin(), E = CatDecl->instmeth_end();
@@ -1001,7 +1001,7 @@ void RewriteObjC::RewriteProtocolDecl(ObjCProtocolDecl *PDecl) {
 
   for (ObjCInterfaceDecl::prop_iterator I = PDecl->prop_begin(),
        E = PDecl->prop_end(); I != E; ++I)
-    RewriteProperty(&*I);
+    RewriteProperty(*I);
   
   // Lastly, comment out the @end.
   SourceLocation LocEnd = PDecl->getAtEndRange().getBegin();
@@ -1207,7 +1207,7 @@ void RewriteObjC::RewriteImplementationDecl(Decl *OID) {
        I = IMD ? IMD->propimpl_begin() : CID->propimpl_begin(),
        E = IMD ? IMD->propimpl_end() : CID->propimpl_end();
        I != E; ++I) {
-    RewritePropertyImplDecl(&*I, IMD, CID);
+    RewritePropertyImplDecl(*I, IMD, CID);
   }
 
   InsertText(IMD ? IMD->getLocEnd() : CID->getLocEnd(), "// ");
@@ -1233,7 +1233,7 @@ void RewriteObjC::RewriteInterfaceDecl(ObjCInterfaceDecl *ClassDecl) {
 
   for (ObjCInterfaceDecl::prop_iterator I = ClassDecl->prop_begin(),
          E = ClassDecl->prop_end(); I != E; ++I)
-    RewriteProperty(&*I);
+    RewriteProperty(*I);
   for (ObjCInterfaceDecl::instmeth_iterator
          I = ClassDecl->instmeth_begin(), E = ClassDecl->instmeth_end();
        I != E; ++I)
@@ -2592,7 +2592,7 @@ QualType RewriteObjC::getSuperStructType() {
                                                  FieldTypes[i], 0,
                                                  /*BitWidth=*/0,
                                                  /*Mutable=*/false,
-                                                 /*HasInit=*/false));
+                                                 ICIS_NoInit));
     }
 
     SuperStructDecl->completeDefinition();
@@ -2625,7 +2625,7 @@ QualType RewriteObjC::getConstantStringStructType() {
                                                     FieldTypes[i], 0,
                                                     /*BitWidth=*/0,
                                                     /*Mutable=*/true,
-                                                    /*HasInit=*/false));
+                                                    ICIS_NoInit));
     }
 
     ConstantStringDecl->completeDefinition();
@@ -3887,7 +3887,7 @@ Stmt *RewriteObjC::SynthesizeBlockCall(CallExpr *Exp, const Expr *BlockExp) {
                                     &Context->Idents.get("FuncPtr"),
                                     Context->VoidPtrTy, 0,
                                     /*BitWidth=*/0, /*Mutable=*/true,
-                                    /*HasInit=*/false);
+                                    ICIS_NoInit);
   MemberExpr *ME = new (Context) MemberExpr(PE, true, FD, SourceLocation(),
                                             FD->getType(), VK_LValue,
                                             OK_Ordinary);
@@ -3936,7 +3936,7 @@ Stmt *RewriteObjC::RewriteBlockDeclRefExpr(DeclRefExpr *DeclRefExp) {
                                     &Context->Idents.get("__forwarding"), 
                                     Context->VoidPtrTy, 0,
                                     /*BitWidth=*/0, /*Mutable=*/true,
-                                    /*HasInit=*/false);
+                                    ICIS_NoInit);
   MemberExpr *ME = new (Context) MemberExpr(DeclRefExp, isArrow,
                                             FD, SourceLocation(),
                                             FD->getType(), VK_LValue,
@@ -3947,7 +3947,7 @@ Stmt *RewriteObjC::RewriteBlockDeclRefExpr(DeclRefExpr *DeclRefExp) {
                          &Context->Idents.get(Name), 
                          Context->VoidPtrTy, 0,
                          /*BitWidth=*/0, /*Mutable=*/true,
-                         /*HasInit=*/false);
+                         ICIS_NoInit);
   ME = new (Context) MemberExpr(ME, true, FD, SourceLocation(),
                                 DeclRefExp->getType(), VK_LValue, OK_Ordinary);
   
@@ -4881,7 +4881,7 @@ Stmt *RewriteObjC::RewriteFunctionBodyOrGlobalInitializer(Stmt *S) {
 void RewriteObjC::RewriteRecordBody(RecordDecl *RD) {
   for (RecordDecl::field_iterator i = RD->field_begin(), 
                                   e = RD->field_end(); i != e; ++i) {
-    FieldDecl *FD = &*i;
+    FieldDecl *FD = *i;
     if (isTopLevelBlockPointerType(FD->getType()))
       RewriteBlockPointerDecl(FD);
     if (FD->getType()->isObjCQualifiedIdType() ||
@@ -5434,7 +5434,7 @@ void RewriteObjCFragileABI::RewriteObjCClassMetaData(ObjCImplementationDecl *IDe
       for (ObjCInterfaceDecl::ivar_iterator
            IV = IDecl->ivar_begin(), IVEnd = IDecl->ivar_end();
            IV != IVEnd; ++IV)
-        IVars.push_back(&*IV);
+        IVars.push_back(*IV);
       IVI = IDecl->ivar_begin();
       IVE = IDecl->ivar_end();
     } else {
@@ -5445,22 +5445,22 @@ void RewriteObjCFragileABI::RewriteObjCClassMetaData(ObjCImplementationDecl *IDe
     Result += IVI->getNameAsString();
     Result += "\", \"";
     std::string TmpString, StrEncoding;
-    Context->getObjCEncodingForType(IVI->getType(), TmpString, &*IVI);
+    Context->getObjCEncodingForType(IVI->getType(), TmpString, *IVI);
     QuoteDoublequotes(TmpString, StrEncoding);
     Result += StrEncoding;
     Result += "\", ";
-    RewriteIvarOffsetComputation(&*IVI, Result);
+    RewriteIvarOffsetComputation(*IVI, Result);
     Result += "}\n";
     for (++IVI; IVI != IVE; ++IVI) {
       Result += "\t  ,{\"";
       Result += IVI->getNameAsString();
       Result += "\", \"";
       std::string TmpString, StrEncoding;
-      Context->getObjCEncodingForType(IVI->getType(), TmpString, &*IVI);
+      Context->getObjCEncodingForType(IVI->getType(), TmpString, *IVI);
       QuoteDoublequotes(TmpString, StrEncoding);
       Result += StrEncoding;
       Result += "\", ";
-      RewriteIvarOffsetComputation(&*IVI, Result);
+      RewriteIvarOffsetComputation(*IVI, Result);
       Result += "}\n";
     }
     
@@ -6015,4 +6015,3 @@ Stmt *RewriteObjCFragileABI::RewriteObjCIvarRefExpr(ObjCIvarRefExpr *IV) {
   ReplaceStmtWithRange(IV, Replacement, OldRange);
   return Replacement;  
 }
-

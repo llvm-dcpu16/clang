@@ -90,8 +90,6 @@ public:
   unsigned NoNaNsFPMath      : 1; ///< Assume FP arguments, results not NaN.
   unsigned NoZeroInitializedInBSS : 1; ///< -fno-zero-initialized-in-bss
   unsigned ObjCDispatchMethod : 2; ///< Method of Objective-C dispatch to use.
-  unsigned ObjCRuntimeHasARC : 1; ///< The target runtime supports ARC natively
-  unsigned ObjCRuntimeHasTerminate : 1; ///< The ObjC runtime has objc_terminate
   unsigned OmitLeafFramePointer : 1; ///< Set when -momit-leaf-frame-pointer is
                                      ///< enabled.
   unsigned OptimizationLevel : 3; ///< The -O[0-4] option specified.
@@ -118,6 +116,8 @@ public:
 
   unsigned StackRealignment  : 1; ///< Control whether to permit stack
                                   ///< realignment.
+  unsigned UseInitArray      : 1; ///< Control whether to use .init_array or
+                                  ///< .ctors.
   unsigned StackAlignment;        ///< Overrides default stack alignment,
                                   ///< if not 0.
 
@@ -172,6 +172,9 @@ public:
   /// or 0 if unspecified.
   unsigned NumRegisterParameters;
 
+  /// The run-time penalty for bounds checking, or 0 to disable.
+  unsigned char BoundsChecking;
+
 public:
   CodeGenOptions() {
     AsmVerbose = 0;
@@ -204,8 +207,6 @@ public:
     NumRegisterParameters = 0;
     ObjCAutoRefCountExceptions = 0;
     ObjCDispatchMethod = Legacy;
-    ObjCRuntimeHasARC = 0;
-    ObjCRuntimeHasTerminate = 0;
     OmitLeafFramePointer = 0;
     OptimizationLevel = 0;
     OptimizeSize = 0;
@@ -224,6 +225,8 @@ public:
     VerifyModule = 1;
     StackRealignment = 0;
     StackAlignment = 0;
+    BoundsChecking = 0;
+    UseInitArray = 0;
 
     DebugInfo = NoDebugInfo;
     Inlining = NoInlining;

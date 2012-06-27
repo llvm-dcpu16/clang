@@ -47,6 +47,15 @@ static void Scan(IvarUsageMap& M, const Stmt *S) {
     return;
   }
 
+  if (const PseudoObjectExpr *POE = dyn_cast<PseudoObjectExpr>(S))
+    for (PseudoObjectExpr::const_semantics_iterator
+        i = POE->semantics_begin(), e = POE->semantics_end(); i != e; ++i) {
+      const Expr *sub = *i;
+      if (const OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(sub))
+        sub = OVE->getSourceExpr();
+      Scan(M, sub);
+    }
+
   for (Stmt::const_child_iterator I=S->child_begin(),E=S->child_end(); I!=E;++I)
     Scan(M, *I);
 }
@@ -76,7 +85,7 @@ static void Scan(IvarUsageMap& M, const ObjCContainerDecl *D) {
     // to an ivar.
     for (ObjCImplementationDecl::propimpl_iterator I = ID->propimpl_begin(),
          E = ID->propimpl_end(); I!=E; ++I)
-      Scan(M, &*I);
+      Scan(M, *I);
 
     // Scan the associated categories as well.
     for (const ObjCCategoryDecl *CD =
@@ -109,7 +118,7 @@ static void checkObjCUnusedIvar(const ObjCImplementationDecl *D,
   for (ObjCInterfaceDecl::ivar_iterator I=ID->ivar_begin(),
         E=ID->ivar_end(); I!=E; ++I) {
 
-    const ObjCIvarDecl *ID = &*I;
+    const ObjCIvarDecl *ID = *I;
 
     // Ignore ivars that...
     // (a) aren't private

@@ -46,3 +46,17 @@ typedef struct {
 
 int dealocateMemWhenDoneByVal(void*, StWithCallback);
 int dealocateMemWhenDoneByRef(StWithCallback*, const void*);
+
+typedef struct CGContext *CGContextRef;
+CGContextRef CGBitmapContextCreate(void *data/*, size_t width, size_t height,
+                                   size_t bitsPerComponent, size_t bytesPerRow,
+                                   CGColorSpaceRef space,
+                                   CGBitmapInfo bitmapInfo*/);
+void *CGBitmapContextGetData(CGContextRef context);
+
+// Include xpc.
+typedef struct _xpc_connection_s * xpc_connection_t;
+typedef void (*xpc_finalizer_t)(void *value);
+void xpc_connection_set_context(xpc_connection_t connection, void *context);
+void xpc_connection_set_finalizer_f(xpc_connection_t connection, xpc_finalizer_t finalizer);
+void xpc_connection_resume(xpc_connection_t connection);

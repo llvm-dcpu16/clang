@@ -389,13 +389,22 @@ StandardConversionSequence::getNarrowingKind(ASTContext &Ctx,
     const unsigned ToWidth = Ctx.getIntWidth(ToType);
 
     if (FromWidth > ToWidth ||
-        (FromWidth == ToWidth && FromSigned != ToSigned)) {
+        (FromWidth == ToWidth && FromSigned != ToSigned) ||
+        (FromSigned && !ToSigned)) {
       // Not all values of FromType can be represented in ToType.
       llvm::APSInt InitializerValue;
       const Expr *Initializer = IgnoreNarrowingConversion(Converted);
-      if (Initializer->isIntegerConstantExpr(InitializerValue, Ctx)) {
-        ConstantValue = APValue(InitializerValue);
-
+      if (!Initializer->isIntegerConstantExpr(InitializerValue, Ctx)) {
+        // Such conversions on variables are always narrowing.
+        return NK_Variable_Narrowing;
+      }
+      bool Narrowing = false;
+      if (FromWidth < ToWidth) {
+        // Negative -> unsigned is narrowing. Otherwise, more bits is never
+        // narrowing.
+        if (InitializerValue.isSigned() && InitializerValue.isNegative())
+          Narrowing = true;
+      } else {
         // Add a bit to the InitializerValue so we don't have to worry about
         // signed vs. unsigned comparisons.
         InitializerValue = InitializerValue.extend(
@@ -407,13 +416,13 @@ StandardConversionSequence::getNarrowingKind(ASTContext &Ctx,
         ConvertedValue = ConvertedValue.extend(InitializerValue.getBitWidth());
         ConvertedValue.setIsSigned(InitializerValue.isSigned());
         // If the result is different, this was a narrowing conversion.
-        if (ConvertedValue != InitializerValue) {
-          ConstantType = Initializer->getType();
-          return NK_Constant_Narrowing;
-        }
-      } else {
-        // Variables are always narrowings.
-        return NK_Variable_Narrowing;
+        if (ConvertedValue != InitializerValue)
+          Narrowing = true;
+      }
+      if (Narrowing) {
+        ConstantType = Initializer->getType();
+        ConstantValue = APValue(InitializerValue);
+        return NK_Constant_Narrowing;
       }
     }
     return NK_Not_Narrowing;
@@ -4153,7 +4162,7 @@ TryReferenceInit(Sema &S, Expr *Init, QualType DeclType,
   // qualifier.
   // This is also the point where rvalue references and lvalue inits no longer
   // go together.
-  if (!isRValRef && !T1.isConstQualified())
+  if (!isRValRef && (!T1.isConstQualified() || T1.isVolatileQualified()))
     return ICS;
 
   //       -- If the initializer expression
@@ -5013,29 +5022,9 @@ static bool isIntegralOrEnumerationType(QualType T, bool AllowScopedEnum) {
 /// \param Loc The source location of the construct that requires the
 /// conversion.
 ///
-/// \param FromE The expression we're converting from.
+/// \param From The expression we're converting from.
 ///
-/// \param NotIntDiag The diagnostic to be emitted if the expression does not
-/// have integral or enumeration type.
-///
-/// \param IncompleteDiag The diagnostic to be emitted if the expression has
-/// incomplete class type.
-///
-/// \param ExplicitConvDiag The diagnostic to be emitted if we're calling an
-/// explicit conversion function (because no implicit conversion functions
-/// were available). This is a recovery mode.
-///
-/// \param ExplicitConvNote The note to be emitted with \p ExplicitConvDiag,
-/// showing which conversion was picked.
-///
-/// \param AmbigDiag The diagnostic to be emitted if there is more than one
-/// conversion function that could convert to integral or enumeration type.
-///
-/// \param AmbigNote The note to be emitted with \p AmbigDiag for each
-/// usable conversion function.
-///
-/// \param ConvDiag The diagnostic to be emitted if we are calling a conversion
-/// function, which may be an extension in this case.
+/// \param Diagnoser Used to output any diagnostics.
 ///
 /// \param AllowScopedEnumerations Specifies whether conversions to scoped
 /// enumerations should be considered.
@@ -5212,7 +5201,7 @@ Sema::ConvertToIntegralOrEnumerationType(SourceLocation Loc, Expr *From,
 /// @p SuppressUserConversions, then don't allow user-defined
 /// conversions via constructors or conversion operators.
 ///
-/// \para PartialOverloading true if we are performing "partial" overloading
+/// \param PartialOverloading true if we are performing "partial" overloading
 /// based on an incomplete set of function arguments. This feature is used by
 /// code completion.
 void
@@ -6120,40 +6109,49 @@ BuiltinCandidateTypeSet::AddPointerWithMoreQualifiedTypeVariants(QualType Ty,
   const PointerType *PointerTy = Ty->getAs<PointerType>();
   bool buildObjCPtr = false;
   if (!PointerTy) {
-    if (const ObjCObjectPointerType *PTy = Ty->getAs<ObjCObjectPointerType>()) {
-      PointeeTy = PTy->getPointeeType();
-      buildObjCPtr = true;
-    }
-    else
-      llvm_unreachable("type was not a pointer type!");
-  }
-  else
+    const ObjCObjectPointerType *PTy = Ty->castAs<ObjCObjectPointerType>();
+    PointeeTy = PTy->getPointeeType();
+    buildObjCPtr = true;
+  } else {
     PointeeTy = PointerTy->getPointeeType();
-
+  }
+  
   // Don't add qualified variants of arrays. For one, they're not allowed
   // (the qualifier would sink to the element type), and for another, the
   // only overload situation where it matters is subscript or pointer +- int,
   // and those shouldn't have qualifier variants anyway.
   if (PointeeTy->isArrayType())
     return true;
+  
   unsigned BaseCVR = PointeeTy.getCVRQualifiers();
-  if (const ConstantArrayType *Array =Context.getAsConstantArrayType(PointeeTy))
-    BaseCVR = Array->getElementType().getCVRQualifiers();
   bool hasVolatile = VisibleQuals.hasVolatile();
   bool hasRestrict = VisibleQuals.hasRestrict();
 
   // Iterate through all strict supersets of BaseCVR.
   for (unsigned CVR = BaseCVR+1; CVR <= Qualifiers::CVRMask; ++CVR) {
     if ((CVR | BaseCVR) != CVR) continue;
-    // Skip over Volatile/Restrict if no Volatile/Restrict found anywhere
-    // in the types.
+    // Skip over volatile if no volatile found anywhere in the types.
     if ((CVR & Qualifiers::Volatile) && !hasVolatile) continue;
-    if ((CVR & Qualifiers::Restrict) && !hasRestrict) continue;
+    
+    // Skip over restrict if no restrict found anywhere in the types, or if
+    // the type cannot be restrict-qualified.
+    if ((CVR & Qualifiers::Restrict) &&
+        (!hasRestrict ||
+         (!(PointeeTy->isAnyPointerType() || PointeeTy->isReferenceType()))))
+      continue;
+  
+    // Build qualified pointee type.
     QualType QPointeeTy = Context.getCVRQualifiedType(PointeeTy, CVR);
+    
+    // Build qualified pointer type.
+    QualType QPointerTy;
     if (!buildObjCPtr)
-      PointerTypes.insert(Context.getPointerType(QPointeeTy));
+      QPointerTy = Context.getPointerType(QPointeeTy);
     else
-      PointerTypes.insert(Context.getObjCObjectPointerType(QPointeeTy));
+      QPointerTy = Context.getObjCObjectPointerType(QPointeeTy);
+    
+    // Insert qualified pointer type.
+    PointerTypes.insert(QPointerTy);
   }
 
   return true;
@@ -6350,6 +6348,8 @@ static  Qualifiers CollectVRQualifiers(ASTContext &Context, Expr* ArgExpr) {
         // as see them.
         bool done = false;
         while (!done) {
+          if (CanTy.isRestrictQualified())
+            VRQuals.addRestrict();
           if (const PointerType *ResTypePtr = CanTy->getAs<PointerType>())
             CanTy = ResTypePtr->getPointeeType();
           else if (const MemberPointerType *ResTypeMPtr =
@@ -6359,8 +6359,6 @@ static  Qualifiers CollectVRQualifiers(ASTContext &Context, Expr* ArgExpr) {
             done = true;
           if (CanTy.isVolatileQualified())
             VRQuals.addVolatile();
-          if (CanTy.isRestrictQualified())
-            VRQuals.addRestrict();
           if (VRQuals.hasRestrict() && VRQuals.hasVolatile())
             return VRQuals;
         }
@@ -6390,12 +6388,12 @@ class BuiltinOperatorOverloadBuilder {
   // The "promoted arithmetic types" are the arithmetic
   // types are that preserved by promotion (C++ [over.built]p2).
   static const unsigned FirstIntegralType = 3;
-  static const unsigned LastIntegralType = 18;
+  static const unsigned LastIntegralType = 20;
   static const unsigned FirstPromotedIntegralType = 3,
-                        LastPromotedIntegralType = 9;
+                        LastPromotedIntegralType = 11;
   static const unsigned FirstPromotedArithmeticType = 0,
-                        LastPromotedArithmeticType = 9;
-  static const unsigned NumArithmeticTypes = 18;
+                        LastPromotedArithmeticType = 11;
+  static const unsigned NumArithmeticTypes = 20;
 
   /// \brief Get the canonical type for a given arithmetic type index.
   CanQualType getArithmeticType(unsigned index) {
@@ -6411,9 +6409,11 @@ class BuiltinOperatorOverloadBuilder {
       &ASTContext::IntTy,
       &ASTContext::LongTy,
       &ASTContext::LongLongTy,
+      &ASTContext::Int128Ty,
       &ASTContext::UnsignedIntTy,
       &ASTContext::UnsignedLongTy,
       &ASTContext::UnsignedLongLongTy,
+      &ASTContext::UnsignedInt128Ty,
       // End of promoted types.
 
       &ASTContext::BoolTy,
@@ -6426,7 +6426,7 @@ class BuiltinOperatorOverloadBuilder {
       &ASTContext::UnsignedCharTy,
       &ASTContext::UnsignedShortTy,
       // End of integral types.
-      // FIXME: What about complex?
+      // FIXME: What about complex? What about half?
     };
     return S.Context.*ArithmeticTypes[index];
   }
@@ -6445,20 +6445,24 @@ class BuiltinOperatorOverloadBuilder {
     // *except* when dealing with signed types of higher rank.
     // (we could precompute SLL x UI for all known platforms, but it's
     // better not to make any assumptions).
+    // We assume that int128 has a higher rank than long long on all platforms.
     enum PromotedType {
-                  Flt,  Dbl, LDbl,   SI,   SL,  SLL,   UI,   UL,  ULL, Dep=-1
+            Dep=-1,
+            Flt,  Dbl, LDbl,   SI,   SL,  SLL, S128,   UI,   UL,  ULL, U128
     };
     static const PromotedType ConversionsTable[LastPromotedArithmeticType]
                                         [LastPromotedArithmeticType] = {
-      /* Flt*/ {  Flt,  Dbl, LDbl,  Flt,  Flt,  Flt,  Flt,  Flt,  Flt },
-      /* Dbl*/ {  Dbl,  Dbl, LDbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl },
-      /*LDbl*/ { LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl },
-      /*  SI*/ {  Flt,  Dbl, LDbl,   SI,   SL,  SLL,   UI,   UL,  ULL },
-      /*  SL*/ {  Flt,  Dbl, LDbl,   SL,   SL,  SLL,  Dep,   UL,  ULL },
-      /* SLL*/ {  Flt,  Dbl, LDbl,  SLL,  SLL,  SLL,  Dep,  Dep,  ULL },
-      /*  UI*/ {  Flt,  Dbl, LDbl,   UI,  Dep,  Dep,   UI,   UL,  ULL },
-      /*  UL*/ {  Flt,  Dbl, LDbl,   UL,   UL,  Dep,   UL,   UL,  ULL },
-      /* ULL*/ {  Flt,  Dbl, LDbl,  ULL,  ULL,  ULL,  ULL,  ULL,  ULL },
+/* Flt*/ {  Flt,  Dbl, LDbl,  Flt,  Flt,  Flt,  Flt,  Flt,  Flt,  Flt,  Flt },
+/* Dbl*/ {  Dbl,  Dbl, LDbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl,  Dbl },
+/*LDbl*/ { LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl, LDbl },
+/*  SI*/ {  Flt,  Dbl, LDbl,   SI,   SL,  SLL, S128,   UI,   UL,  ULL, U128 },
+/*  SL*/ {  Flt,  Dbl, LDbl,   SL,   SL,  SLL, S128,  Dep,   UL,  ULL, U128 },
+/* SLL*/ {  Flt,  Dbl, LDbl,  SLL,  SLL,  SLL, S128,  Dep,  Dep,  ULL, U128 },
+/*S128*/ {  Flt,  Dbl, LDbl, S128, S128, S128, S128, S128, S128, S128, U128 },
+/*  UI*/ {  Flt,  Dbl, LDbl,   UI,  Dep,  Dep, S128,   UI,   UL,  ULL, U128 },
+/*  UL*/ {  Flt,  Dbl, LDbl,   UL,   UL,  Dep, S128,   UL,   UL,  ULL, U128 },
+/* ULL*/ {  Flt,  Dbl, LDbl,  ULL,  ULL,  ULL, S128,  ULL,  ULL,  ULL, U128 },
+/*U128*/ {  Flt,  Dbl, LDbl, U128, U128, U128, U128, U128, U128, U128, U128 },
     };
 
     assert(L < LastPromotedArithmeticType);
@@ -6488,7 +6492,8 @@ class BuiltinOperatorOverloadBuilder {
   /// \brief Helper method to factor out the common pattern of adding overloads
   /// for '++' and '--' builtin operators.
   void addPlusPlusMinusMinusStyleOverloads(QualType CandidateTy,
-                                           bool HasVolatile) {
+                                           bool HasVolatile,
+                                           bool HasRestrict) {
     QualType ParamTypes[2] = {
       S.Context.getLValueReferenceType(CandidateTy),
       S.Context.IntTy
@@ -6511,6 +6516,33 @@ class BuiltinOperatorOverloadBuilder {
       else
         S.AddBuiltinCandidate(CandidateTy, ParamTypes, Args, 2, CandidateSet);
     }
+    
+    // Add restrict version only if there are conversions to a restrict type
+    // and our candidate type is a non-restrict-qualified pointer.
+    if (HasRestrict && CandidateTy->isAnyPointerType() &&
+        !CandidateTy.isRestrictQualified()) {
+      ParamTypes[0]
+        = S.Context.getLValueReferenceType(
+            S.Context.getCVRQualifiedType(CandidateTy, Qualifiers::Restrict));
+      if (NumArgs == 1)
+        S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 1, CandidateSet);
+      else
+        S.AddBuiltinCandidate(CandidateTy, ParamTypes, Args, 2, CandidateSet);
+      
+      if (HasVolatile) {
+        ParamTypes[0]
+          = S.Context.getLValueReferenceType(
+              S.Context.getCVRQualifiedType(CandidateTy,
+                                            (Qualifiers::Volatile |
+                                             Qualifiers::Restrict)));
+        if (NumArgs == 1)
+          S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 1,
+                                CandidateSet);
+        else
+          S.AddBuiltinCandidate(CandidateTy, ParamTypes, Args, 2, CandidateSet);
+      }
+    }
+
   }
 
 public:
@@ -6530,13 +6562,13 @@ public:
     assert(getArithmeticType(FirstPromotedIntegralType) == S.Context.IntTy &&
            "Invalid first promoted integral type");
     assert(getArithmeticType(LastPromotedIntegralType - 1)
-             == S.Context.UnsignedLongLongTy &&
+             == S.Context.UnsignedInt128Ty &&
            "Invalid last promoted integral type");
     assert(getArithmeticType(FirstPromotedArithmeticType)
              == S.Context.FloatTy &&
            "Invalid first promoted arithmetic type");
     assert(getArithmeticType(LastPromotedArithmeticType - 1)
-             == S.Context.UnsignedLongLongTy &&
+             == S.Context.UnsignedInt128Ty &&
            "Invalid last promoted arithmetic type");
   }
 
@@ -6565,7 +6597,8 @@ public:
          Arith < NumArithmeticTypes; ++Arith) {
       addPlusPlusMinusMinusStyleOverloads(
         getArithmeticType(Arith),
-        VisibleTypeConversionsQuals.hasVolatile());
+        VisibleTypeConversionsQuals.hasVolatile(),
+        VisibleTypeConversionsQuals.hasRestrict());
     }
   }
 
@@ -6589,8 +6622,10 @@ public:
         continue;
 
       addPlusPlusMinusMinusStyleOverloads(*Ptr,
-        (!S.Context.getCanonicalType(*Ptr).isVolatileQualified() &&
-         VisibleTypeConversionsQuals.hasVolatile()));
+        (!(*Ptr).isVolatileQualified() &&
+         VisibleTypeConversionsQuals.hasVolatile()),
+        (!(*Ptr).isRestrictQualified() &&
+         VisibleTypeConversionsQuals.hasRestrict()));
     }
   }
 
@@ -7048,13 +7083,35 @@ public:
       S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2, CandidateSet,
                             /*IsAssigmentOperator=*/ isEqualOp);
 
-      if (!S.Context.getCanonicalType(*Ptr).isVolatileQualified() &&
-          VisibleTypeConversionsQuals.hasVolatile()) {
+      bool NeedVolatile = !(*Ptr).isVolatileQualified() &&
+                          VisibleTypeConversionsQuals.hasVolatile();
+      if (NeedVolatile) {
         // volatile version
         ParamTypes[0] =
           S.Context.getLValueReferenceType(S.Context.getVolatileType(*Ptr));
         S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2, CandidateSet,
                               /*IsAssigmentOperator=*/isEqualOp);
+      }
+      
+      if (!(*Ptr).isRestrictQualified() &&
+          VisibleTypeConversionsQuals.hasRestrict()) {
+        // restrict version
+        ParamTypes[0]
+          = S.Context.getLValueReferenceType(S.Context.getRestrictType(*Ptr));
+        S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2, CandidateSet,
+                              /*IsAssigmentOperator=*/isEqualOp);
+        
+        if (NeedVolatile) {
+          // volatile restrict version
+          ParamTypes[0]
+            = S.Context.getLValueReferenceType(
+                S.Context.getCVRQualifiedType(*Ptr,
+                                              (Qualifiers::Volatile |
+                                               Qualifiers::Restrict)));
+          S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2,
+                                CandidateSet,
+                                /*IsAssigmentOperator=*/isEqualOp);
+        }
       }
     }
 
@@ -7076,13 +7133,35 @@ public:
         S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2, CandidateSet,
                               /*IsAssigmentOperator=*/true);
 
-        if (!S.Context.getCanonicalType(*Ptr).isVolatileQualified() &&
-            VisibleTypeConversionsQuals.hasVolatile()) {
+        bool NeedVolatile = !(*Ptr).isVolatileQualified() &&
+                           VisibleTypeConversionsQuals.hasVolatile();
+        if (NeedVolatile) {
           // volatile version
           ParamTypes[0] =
             S.Context.getLValueReferenceType(S.Context.getVolatileType(*Ptr));
           S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2,
                                 CandidateSet, /*IsAssigmentOperator=*/true);
+        }
+      
+        if (!(*Ptr).isRestrictQualified() &&
+            VisibleTypeConversionsQuals.hasRestrict()) {
+          // restrict version
+          ParamTypes[0]
+            = S.Context.getLValueReferenceType(S.Context.getRestrictType(*Ptr));
+          S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2,
+                                CandidateSet, /*IsAssigmentOperator=*/true);
+          
+          if (NeedVolatile) {
+            // volatile restrict version
+            ParamTypes[0]
+              = S.Context.getLValueReferenceType(
+                  S.Context.getCVRQualifiedType(*Ptr,
+                                                (Qualifiers::Volatile |
+                                                 Qualifiers::Restrict)));
+            S.AddBuiltinCandidate(ParamTypes[0], ParamTypes, Args, 2,
+                                  CandidateSet, /*IsAssigmentOperator=*/true);
+            
+          }
         }
       }
     }
@@ -7727,13 +7806,11 @@ isBetterOverloadCandidate(Sema &S,
 /// \brief Computes the best viable function (C++ 13.3.3)
 /// within an overload candidate set.
 ///
-/// \param CandidateSet the set of candidate functions.
-///
-/// \param Loc the location of the function name (or operator symbol) for
+/// \param Loc The location of the function name (or operator symbol) for
 /// which overload resolution occurs.
 ///
-/// \param Best f overload resolution was successful or found a deleted
-/// function, Best points to the candidate function found.
+/// \param Best If overload resolution was successful or found a deleted
+/// function, \p Best points to the candidate function found.
 ///
 /// \returns The result of overload resolution.
 OverloadingResult
@@ -8057,12 +8134,22 @@ void DiagnoseBadConversion(Sema &S, OverloadCandidate *Cand, unsigned I) {
               FromIface->isSuperClassOf(ToIface))
             BaseToDerivedConversion = 2;
   } else if (const ReferenceType *ToRefTy = ToTy->getAs<ReferenceType>()) {
-      if (ToRefTy->getPointeeType().isAtLeastAsQualifiedAs(FromTy) &&
-          !FromTy->isIncompleteType() &&
-          !ToRefTy->getPointeeType()->isIncompleteType() &&
-          S.IsDerivedFrom(ToRefTy->getPointeeType(), FromTy))
-        BaseToDerivedConversion = 3;
+    if (ToRefTy->getPointeeType().isAtLeastAsQualifiedAs(FromTy) &&
+        !FromTy->isIncompleteType() &&
+        !ToRefTy->getPointeeType()->isIncompleteType() &&
+        S.IsDerivedFrom(ToRefTy->getPointeeType(), FromTy)) {
+      BaseToDerivedConversion = 3;
+    } else if (ToTy->isLValueReferenceType() && !FromExpr->isLValue() &&
+               ToTy.getNonReferenceType().getCanonicalType() ==
+               FromTy.getNonReferenceType().getCanonicalType()) {
+      S.Diag(Fn->getLocation(), diag::note_ovl_candidate_bad_lvalue)
+        << (unsigned) FnKind << FnDesc
+        << (FromExpr ? FromExpr->getSourceRange() : SourceRange())
+        << (unsigned) isObjectArgument << I + 1;
+      MaybeEmitInheritedConstructorNote(S, Fn);
+      return;
     }
+  }
 
   if (BaseToDerivedConversion) {
     S.Diag(Fn->getLocation(),
@@ -9744,14 +9831,14 @@ static bool IsOverloaded(const UnresolvedSetImpl &Functions) {
 /// \param OpcIn The UnaryOperator::Opcode that describes this
 /// operator.
 ///
-/// \param Functions The set of non-member functions that will be
+/// \param Fns The set of non-member functions that will be
 /// considered by overload resolution. The caller needs to build this
 /// set based on the context using, e.g.,
 /// LookupOverloadedOperatorName() and ArgumentDependentLookup(). This
 /// set should not contain any member functions; those will be added
 /// by CreateOverloadedUnaryOp().
 ///
-/// \param input The input argument.
+/// \param Input The input argument.
 ExprResult
 Sema::CreateOverloadedUnaryOp(SourceLocation OpLoc, unsigned OpcIn,
                               const UnresolvedSetImpl &Fns,
@@ -9944,7 +10031,7 @@ Sema::CreateOverloadedUnaryOp(SourceLocation OpLoc, unsigned OpcIn,
 /// \param OpcIn The BinaryOperator::Opcode that describes this
 /// operator.
 ///
-/// \param Functions The set of non-member functions that will be
+/// \param Fns The set of non-member functions that will be
 /// considered by overload resolution. The caller needs to build this
 /// set based on the context using, e.g.,
 /// LookupOverloadedOperatorName() and ArgumentDependentLookup(). This
@@ -10611,7 +10698,7 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
 
   DiagnoseSentinelCalls(Method, LParenLoc, Args, NumArgs);
 
-  if (CheckFunctionCall(Method, TheCall))
+  if (CheckFunctionCall(Method, TheCall, Proto))
     return ExprError();
 
   if ((isa<CXXConstructorDecl>(CurContext) || 
@@ -10919,7 +11006,7 @@ Sema::BuildCallToObjectOfClassType(Scope *S, Expr *Obj,
 
   DiagnoseSentinelCalls(Method, LParenLoc, Args, NumArgs);
 
-  if (CheckFunctionCall(Method, TheCall))
+  if (CheckFunctionCall(Method, TheCall, Proto))
     return true;
 
   return MaybeBindToTemporary(TheCall);
@@ -11099,7 +11186,7 @@ ExprResult Sema::BuildLiteralOperatorCall(LookupResult &R,
   if (CheckCallReturnType(FD->getResultType(), UDSuffixLoc, UDL, FD))
     return ExprError();
 
-  if (CheckFunctionCall(FD, UDL))
+  if (CheckFunctionCall(FD, UDL, NULL))
     return ExprError();
 
   return MaybeBindToTemporary(UDL);

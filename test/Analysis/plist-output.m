@@ -105,7 +105,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>5</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -160,6 +160,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_init</string>
+// CHECK:   <key>issue_hash</key><integer>2</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>6</integer>
@@ -184,7 +185,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>10</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -239,6 +240,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_assign</string>
+// CHECK:   <key>issue_hash</key><integer>3</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>12</integer>
@@ -263,7 +265,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>16</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -318,6 +320,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_assign_transitive</string>
+// CHECK:   <key>issue_hash</key><integer>4</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>19</integer>
@@ -342,7 +345,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>23</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -355,7 +358,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>23</integer>
-// CHECK:            <key>col</key><integer>8</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -405,7 +408,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>23</integer>
-// CHECK:            <key>col</key><integer>8</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -460,6 +463,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_cond</string>
+// CHECK:   <key>issue_hash</key><integer>2</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>24</integer>
@@ -484,7 +488,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>29</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -497,7 +501,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>29</integer>
-// CHECK:            <key>col</key><integer>8</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -518,7 +522,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>29</integer>
-// CHECK:            <key>col</key><integer>8</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -531,7 +535,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>31</integer>
-// CHECK:            <key>col</key><integer>5</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -552,7 +556,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>31</integer>
-// CHECK:            <key>col</key><integer>5</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -607,6 +611,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_cond_transitive</string>
+// CHECK:   <key>issue_hash</key><integer>4</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>32</integer>
@@ -631,7 +636,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>37</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>8</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -720,6 +725,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_null_field</string>
+// CHECK:   <key>issue_hash</key><integer>3</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>39</integer>
@@ -744,7 +750,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>44</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -791,7 +797,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>47</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -812,7 +818,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>47</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -859,7 +865,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>50</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -880,7 +886,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>50</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -935,6 +941,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_assumptions</string>
+// CHECK:   <key>issue_hash</key><integer>8</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>51</integer>
@@ -959,7 +966,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>56</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>5</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -972,7 +979,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>57</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -993,7 +1000,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>57</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1069,7 +1076,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>59</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>8</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1090,7 +1097,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>59</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>8</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1103,7 +1110,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>59</integer>
-// CHECK:            <key>col</key><integer>11</integer>
+// CHECK:            <key>col</key><integer>10</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1145,6 +1152,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>function</string>
 // CHECK:   <key>issue_context</key><string>test_cond_assign</string>
+// CHECK:   <key>issue_hash</key><integer>4</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>59</integer>
@@ -1169,7 +1177,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>76</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1216,7 +1224,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>76</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1237,7 +1245,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>76</integer>
-// CHECK:            <key>col</key><integer>3</integer>
+// CHECK:            <key>col</key><integer>4</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1250,7 +1258,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>77</integer>
-// CHECK:            <key>col</key><integer>5</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1271,7 +1279,7 @@ int test_cond_assign() {
 // CHECK:           </dict>
 // CHECK:           <dict>
 // CHECK:            <key>line</key><integer>77</integer>
-// CHECK:            <key>col</key><integer>5</integer>
+// CHECK:            <key>col</key><integer>7</integer>
 // CHECK:            <key>file</key><integer>0</integer>
 // CHECK:           </dict>
 // CHECK:          </array>
@@ -1326,6 +1334,7 @@ int test_cond_assign() {
 // CHECK:    <key>type</key><string>Dereference of null pointer</string>
 // CHECK:   <key>issue_context_kind</key><string>Objective-C method</string>
 // CHECK:   <key>issue_context</key><string>test</string>
+// CHECK:   <key>issue_hash</key><integer>3</integer>
 // CHECK:   <key>location</key>
 // CHECK:   <dict>
 // CHECK:    <key>line</key><integer>78</integer>
@@ -1336,4 +1345,3 @@ int test_cond_assign() {
 // CHECK:  </array>
 // CHECK: </dict>
 // CHECK: </plist>
-

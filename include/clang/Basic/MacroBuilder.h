@@ -24,13 +24,13 @@ class MacroBuilder {
 public:
   MacroBuilder(raw_ostream &Output) : Out(Output) {}
 
-  /// Append a #define line for macro of the form "#define Name Value\n".
+  /// Append a \#define line for macro of the form "\#define Name Value\n".
   void defineMacro(const Twine &Name, const Twine &Value = "1") {
     Out << "#define " << Name << ' ' << Value << '\n';
   }
 
-  /// Append a #undef line for Name.  Name should be of the form XXX
-  /// and we emit "#undef XXX".
+  /// Append a \#undef line for Name.  Name should be of the form XXX
+  /// and we emit "\#undef XXX".
   void undefineMacro(const Twine &Name) {
     Out << "#undef " << Name << '\n';
   }

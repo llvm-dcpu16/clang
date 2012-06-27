@@ -23,6 +23,20 @@
 #include "clang/AST/ASTConsumer.h"
 using namespace clang;
 
+/// \brief A comment handler that passes comments found by the preprocessor
+/// to the parser action.
+class ActionCommentHandler : public CommentHandler {
+  Sema &S;
+
+public:
+  explicit ActionCommentHandler(Sema &S) : S(S) { }
+
+  virtual bool HandleComment(Preprocessor &PP, SourceRange Comment) {
+    S.ActOnComment(Comment);
+    return false;
+  }
+};
+
 IdentifierInfo *Parser::getSEHExceptKeyword() {
   // __except is accepted as a (contextual) keyword 
   if (!Ident__except && (getLangOpts().MicrosoftExt || getLangOpts().Borland))
@@ -59,7 +73,7 @@ Parser::Parser(Preprocessor &pp, Sema &actions, bool SkipFunctionBodies)
   MSStructHandler.reset(new PragmaMSStructHandler(actions));
   PP.AddPragmaHandler(MSStructHandler.get());
 
-  UnusedHandler.reset(new PragmaUnusedHandler(actions, *this));
+  UnusedHandler.reset(new PragmaUnusedHandler(actions));
   PP.AddPragmaHandler(UnusedHandler.get());
 
   WeakHandler.reset(new PragmaWeakHandler(actions));
@@ -68,17 +82,19 @@ Parser::Parser(Preprocessor &pp, Sema &actions, bool SkipFunctionBodies)
   RedefineExtnameHandler.reset(new PragmaRedefineExtnameHandler(actions));
   PP.AddPragmaHandler(RedefineExtnameHandler.get());
 
-  FPContractHandler.reset(new PragmaFPContractHandler(actions, *this));
+  FPContractHandler.reset(new PragmaFPContractHandler(actions));
   PP.AddPragmaHandler("STDC", FPContractHandler.get());
 
   if (getLangOpts().OpenCL) {
-    OpenCLExtensionHandler.reset(
-                  new PragmaOpenCLExtensionHandler(actions, *this));
+    OpenCLExtensionHandler.reset(new PragmaOpenCLExtensionHandler(actions));
     PP.AddPragmaHandler("OPENCL", OpenCLExtensionHandler.get());
 
     PP.AddPragmaHandler("OPENCL", FPContractHandler.get());
   }
-      
+
+  CommentSemaHandler.reset(new ActionCommentHandler(actions));
+  PP.addCommentHandler(CommentSemaHandler.get());
+
   PP.setCodeCompletionHandler(*this);
 }
 
@@ -200,6 +216,33 @@ bool Parser::ExpectAndConsumeSemi(unsigned DiagID) {
   }
   
   return ExpectAndConsume(tok::semi, DiagID);
+}
+
+void Parser::ConsumeExtraSemi(ExtraSemiKind Kind, const char* DiagMsg) {
+  if (!Tok.is(tok::semi)) return;
+
+  // AfterDefinition should only warn when placed on the same line as the
+  // definition.  Otherwise, defer to another semi warning.
+  if (Kind == AfterDefinition && Tok.isAtStartOfLine()) return;
+
+  SourceLocation StartLoc = Tok.getLocation();
+  SourceLocation EndLoc = Tok.getLocation();
+  ConsumeToken();
+
+  while ((Tok.is(tok::semi) && !Tok.isAtStartOfLine())) {
+    EndLoc = Tok.getLocation();
+    ConsumeToken();
+  }
+
+  if (Kind == OutsideFunction && getLangOpts().CPlusPlus0x) {
+    Diag(StartLoc, diag::warn_cxx98_compat_top_level_semi)
+        << FixItHint::CreateRemoval(SourceRange(StartLoc, EndLoc));
+    return;
+  }
+
+  Diag(StartLoc, diag::ext_extra_semi)
+      << Kind << DiagMsg << FixItHint::CreateRemoval(SourceRange(StartLoc,
+                                                                 EndLoc));
 }
 
 //===----------------------------------------------------------------------===//
@@ -396,6 +439,9 @@ Parser::~Parser() {
 
   PP.RemovePragmaHandler("STDC", FPContractHandler.get());
   FPContractHandler.reset();
+
+  PP.removeCommentHandler(CommentSemaHandler.get());
+
   PP.clearCodeCompletionHandler();
 
   assert(TemplateIds.empty() && "Still alive TemplateIdAnnotations around?");
@@ -411,10 +457,6 @@ void Parser::Initialize() {
 
   // Prime the lexer look-ahead.
   ConsumeToken();
-
-  if (Tok.is(tok::eof) &&
-      !getLangOpts().CPlusPlus)  // Empty source file is an extension in C
-    Diag(Tok, diag::ext_empty_source_file);
 
   // Initialization for Objective-C context sensitive keywords recognition.
   // Referenced in Parser::ParseObjCTypeQualifierList.
@@ -582,11 +624,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
     HandlePragmaPack();
     return DeclGroupPtrTy();
   case tok::semi:
-    Diag(Tok, getLangOpts().CPlusPlus0x ?
-         diag::warn_cxx98_compat_top_level_semi : diag::ext_top_level_semi)
-      << FixItHint::CreateRemoval(Tok.getLocation());
-
-    ConsumeToken();
+    ConsumeExtraSemi(OutsideFunction);
     // TODO: Invoke action for top-level semicolon.
     return DeclGroupPtrTy();
   case tok::r_brace:
@@ -708,8 +746,7 @@ Parser::ParseExternalDeclaration(ParsedAttributesWithRange &attrs,
   dont_know:
     // We can't tell whether this is a function-definition or declaration yet.
     if (DS) {
-      DS->takeAttributesFrom(attrs);
-      return ParseDeclarationOrFunctionDefinition(*DS);
+      return ParseDeclarationOrFunctionDefinition(attrs, DS);
     } else {
       return ParseDeclarationOrFunctionDefinition(attrs);
     }
@@ -777,19 +814,23 @@ bool Parser::isStartOfFunctionDefinition(const ParsingDeclarator &Declarator) {
 /// [OMP]   threadprivate-directive                              [TODO]
 ///
 Parser::DeclGroupPtrTy
-Parser::ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
-                                             AccessSpecifier AS) {
+Parser::ParseDeclOrFunctionDefInternal(ParsedAttributesWithRange &attrs,
+                                       ParsingDeclSpec &DS,
+                                       AccessSpecifier AS) {
   // Parse the common declaration-specifiers piece.
   ParseDeclarationSpecifiers(DS, ParsedTemplateInfo(), AS, DSC_top_level);
 
   // C99 6.7.2.3p6: Handle "struct-or-union identifier;", "enum { X };"
   // declaration-specifiers init-declarator-list[opt] ';'
   if (Tok.is(tok::semi)) {
+    ProhibitAttributes(attrs);
     ConsumeToken();
     Decl *TheDecl = Actions.ParsedFreeStandingDeclSpec(getCurScope(), AS, DS);
     DS.complete(TheDecl);
     return Actions.ConvertDeclToDeclGroup(TheDecl);
   }
+
+  DS.takeAttributesFrom(attrs);
 
   // ObjC2 allows prefix attributes on class interfaces and protocols.
   // FIXME: This still needs better diagnostics. We should only accept
@@ -831,16 +872,20 @@ Parser::ParseDeclarationOrFunctionDefinition(ParsingDeclSpec &DS,
 }
 
 Parser::DeclGroupPtrTy
-Parser::ParseDeclarationOrFunctionDefinition(ParsedAttributes &attrs,
+Parser::ParseDeclarationOrFunctionDefinition(ParsedAttributesWithRange &attrs,
+                                             ParsingDeclSpec *DS,
                                              AccessSpecifier AS) {
-  ParsingDeclSpec DS(*this);
-  DS.takeAttributesFrom(attrs);
-  // Must temporarily exit the objective-c container scope for
-  // parsing c constructs and re-enter objc container scope
-  // afterwards.
-  ObjCDeclContextSwitch ObjCDC(*this);
-    
-  return ParseDeclarationOrFunctionDefinition(DS, AS);
+  if (DS) {
+    return ParseDeclOrFunctionDefInternal(attrs, *DS, AS);
+  } else {
+    ParsingDeclSpec PDS(*this);
+    // Must temporarily exit the objective-c container scope for
+    // parsing c constructs and re-enter objc container scope
+    // afterwards.
+    ObjCDeclContextSwitch ObjCDC(*this);
+      
+    return ParseDeclOrFunctionDefInternal(attrs, PDS, AS);
+  }
 }
 
 /// ParseFunctionDefinition - We parsed and verified that the specified
@@ -1248,7 +1293,8 @@ TemplateIdAnnotation *Parser::takeTemplateIdAnnotation(const Token &tok) {
 bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
   assert((Tok.is(tok::identifier) || Tok.is(tok::coloncolon)
           || Tok.is(tok::kw_typename) || Tok.is(tok::annot_cxxscope)
-          || Tok.is(tok::kw_decltype)) && "Cannot be a type or scope token!");
+          || Tok.is(tok::kw_decltype) || Tok.is(tok::annot_template_id))
+          && "Cannot be a type or scope token!");
 
   if (Tok.is(tok::kw_typename)) {
     // Parse a C++ typename-specifier, e.g., "typename T::type".
@@ -1264,10 +1310,21 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
                                        0, /*IsTypename*/true))
       return true;
     if (!SS.isSet()) {
-      if (getLangOpts().MicrosoftExt)
-        Diag(Tok.getLocation(), diag::warn_expected_qualified_after_typename);
-      else
-        Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);
+      if (Tok.is(tok::identifier) || Tok.is(tok::annot_template_id)) {
+        // Attempt to recover by skipping the invalid 'typename'
+        if (!TryAnnotateTypeOrScopeToken(EnteringContext, NeedType) &&
+            Tok.isAnnotation()) {
+          unsigned DiagID = diag::err_expected_qualified_after_typename;
+          // MS compatibility: MSVC permits using known types with typename.
+          // e.g. "typedef typename T* pointer_type"
+          if (getLangOpts().MicrosoftExt)
+            DiagID = diag::warn_expected_qualified_after_typename;
+          Diag(Tok.getLocation(), DiagID);
+          return false;
+        }
+      }
+
+      Diag(Tok.getLocation(), diag::err_expected_qualified_after_typename);
       return true;
     }
 
@@ -1674,13 +1731,13 @@ Parser::DeclGroupPtrTy Parser::ParseModuleImport(SourceLocation AtLoc) {
   return Actions.ConvertDeclToDeclGroup(Import.get());
 }
 
-bool Parser::BalancedDelimiterTracker::diagnoseOverflow() {
+bool BalancedDelimiterTracker::diagnoseOverflow() {
   P.Diag(P.Tok, diag::err_parser_impl_limit_overflow);
   P.SkipUntil(tok::eof);
   return true;  
 }
 
-bool Parser::BalancedDelimiterTracker::expectAndConsume(unsigned DiagID, 
+bool BalancedDelimiterTracker::expectAndConsume(unsigned DiagID,
                                             const char *Msg,
                                             tok::TokenKind SkipToToc ) {
   LOpen = P.Tok.getLocation();
@@ -1693,7 +1750,7 @@ bool Parser::BalancedDelimiterTracker::expectAndConsume(unsigned DiagID,
   return diagnoseOverflow();
 }
 
-bool Parser::BalancedDelimiterTracker::diagnoseMissingClose() {
+bool BalancedDelimiterTracker::diagnoseMissingClose() {
   assert(!P.Tok.is(Close) && "Should have consumed closing delimiter");
   
   const char *LHSName = "unknown";
@@ -1711,6 +1768,6 @@ bool Parser::BalancedDelimiterTracker::diagnoseMissingClose() {
   return true;
 }
 
-void Parser::BalancedDelimiterTracker::skipToEnd() {
+void BalancedDelimiterTracker::skipToEnd() {
   P.SkipUntil(Close, false);
 }

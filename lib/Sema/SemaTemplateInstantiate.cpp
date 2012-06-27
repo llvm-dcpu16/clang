@@ -1093,7 +1093,11 @@ TemplateInstantiator::TransformPredefinedExpr(PredefinedExpr *E) {
   unsigned Length = PredefinedExpr::ComputeName(IT, currentDecl).length();
 
   llvm::APInt LengthI(32, Length + 1);
-  QualType ResTy = getSema().Context.CharTy.withConst();
+  QualType ResTy;
+  if (IT == PredefinedExpr::LFunction)
+    ResTy = getSema().Context.WCharTy.withConst();
+  else
+    ResTy = getSema().Context.CharTy.withConst();
   ResTy = getSema().Context.getConstantArrayType(ResTy, LengthI, 
                                                  ArrayType::Normal, 0);
   PredefinedExpr *PE =
@@ -1383,7 +1387,7 @@ TemplateInstantiator::TransformSubstTemplateTypeParmPackType(
 /// substituted. If this type is not dependent, it will be returned
 /// immediately.
 ///
-/// \param TemplateArgs the template arguments that will be
+/// \param Args the template arguments that will be
 /// substituted for the top-level template parameters within T.
 ///
 /// \param Loc the location in the source code where this substitution
@@ -1942,7 +1946,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
   CheckCompletedCXXClass(Instantiation);
 
   // Attach any in-class member initializers now the class is complete.
-  {
+  if (!FieldsWithMemberInitializers.empty()) {
     // C++11 [expr.prim.general]p4:
     //   Otherwise, if a member-declarator declares a non-static data member 
     //  (9.2) of a class X, the expression this is a prvalue of type "pointer
@@ -1963,9 +1967,7 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
         Expr *Init = NewInit.take();
         assert(Init && "no-argument initializer in class");
         assert(!isa<ParenListExpr>(Init) && "call-style init in class");
-        ActOnCXXInClassMemberInitializer(NewField, 
-                                         Init->getSourceRange().getBegin(), 
-                                         Init);
+        ActOnCXXInClassMemberInitializer(NewField, Init->getLocStart(), Init);
       }
     }
   }

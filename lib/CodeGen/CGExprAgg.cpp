@@ -352,7 +352,7 @@ void AggExprEmitter::EmitStdInitializerList(llvm::Value *destPtr,
     return;
   }
   LValue DestLV = CGF.MakeNaturalAlignAddrLValue(destPtr, initList->getType());
-  LValue start = CGF.EmitLValueForFieldInitialization(DestLV, &*field);
+  LValue start = CGF.EmitLValueForFieldInitialization(DestLV, *field);
   llvm::Value *arrayStart = Builder.CreateStructGEP(alloc, 0, "arraystart");
   CGF.EmitStoreThroughLValue(RValue::get(arrayStart), start);
   ++field;
@@ -361,7 +361,7 @@ void AggExprEmitter::EmitStdInitializerList(llvm::Value *destPtr,
     CGF.ErrorUnsupported(initList, "weird std::initializer_list");
     return;
   }
-  LValue endOrLength = CGF.EmitLValueForFieldInitialization(DestLV, &*field);
+  LValue endOrLength = CGF.EmitLValueForFieldInitialization(DestLV, *field);
   if (ctx.hasSameType(field->getType(), elementPtr)) {
     // End pointer.
     llvm::Value *arrayEnd = Builder.CreateStructGEP(alloc,numInits, "arrayend");
@@ -1005,7 +1005,7 @@ void AggExprEmitter::VisitInitListExpr(InitListExpr *E) {
       break;
     
 
-    LValue LV = CGF.EmitLValueForFieldInitialization(DestLV, &*field);
+    LValue LV = CGF.EmitLValueForFieldInitialization(DestLV, *field);
     // We never generate write-barries for initialized fields.
     LV.setNonGC(true);
     
@@ -1164,9 +1164,6 @@ static void CheckAggExprForMemSetUse(AggValueSlot &Slot, const Expr *E,
 /// type.  The result is computed into DestPtr.  Note that if DestPtr is null,
 /// the value of the aggregate expression is not needed.  If VolatileDest is
 /// true, DestPtr cannot be 0.
-///
-/// \param IsInitializer - true if this evaluation is initializing an
-/// object whose lifetime is already being managed.
 void CodeGenFunction::EmitAggExpr(const Expr *E, AggValueSlot Slot,
                                   bool IgnoreResult) {
   assert(E && hasAggregateLLVMType(E->getType()) &&

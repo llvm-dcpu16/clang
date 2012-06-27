@@ -25,6 +25,7 @@ def AmbigMemberTemplate : DiagGroup<"ambiguous-member-template">;
 def : DiagGroup<"attributes">;
 def : DiagGroup<"bad-function-cast">;
 def Availability : DiagGroup<"availability">;
+def Section : DiagGroup<"section">;
 def AutoImport : DiagGroup<"auto-import">;
 def ConstantConversion : DiagGroup<"constant-conversion">;
 def LiteralConversion : DiagGroup<"literal-conversion">;
@@ -56,6 +57,7 @@ def DeprecatedImplementations :DiagGroup<"deprecated-implementations">;
 def : DiagGroup<"disabled-optimization">;
 def : DiagGroup<"discard-qual">;
 def : DiagGroup<"div-by-zero">;
+def Doxygen : DiagGroup<"doxygen">;
 def EmptyBody : DiagGroup<"empty-body">;
 def ExtraTokens : DiagGroup<"extra-tokens">;
 
@@ -143,6 +145,9 @@ def : DiagGroup<"old-style-cast">;
 def : DiagGroup<"old-style-definition">;
 def OutOfLineDeclaration : DiagGroup<"out-of-line-declaration">;
 def : DiagGroup<"overflow">;
+def ForwardClassReceiver : DiagGroup<"receiver-forward-class">;
+def MethodAccess : DiagGroup<"objc-method-access">;
+def ObjCReceiver : DiagGroup<"receiver-expr">;
 def OverlengthStrings : DiagGroup<"overlength-strings">;
 def OverloadedVirtual : DiagGroup<"overloaded-virtual">;
 def ObjCPropertyImpl : DiagGroup<"objc-property-implementation">;
@@ -208,13 +213,17 @@ def MethodDuplicate : DiagGroup<"duplicate-method-match">;
 def CoveredSwitchDefault : DiagGroup<"covered-switch-default">;
 def SwitchEnum     : DiagGroup<"switch-enum">;
 def Switch         : DiagGroup<"switch">;
-def ImplicitFallthrough  : DiagGroup<"implicit-fallthrough">;
+def ImplicitFallthroughPerFunction :
+  DiagGroup<"implicit-fallthrough-per-function">;
+def ImplicitFallthrough  : DiagGroup<"implicit-fallthrough",
+                                     [ImplicitFallthroughPerFunction]>;
 def Trigraphs      : DiagGroup<"trigraphs">;
 
 def : DiagGroup<"type-limits">;
 def Unicode  : DiagGroup<"unicode">;
-def Uninitialized  : DiagGroup<"uninitialized">;
 def UninitializedMaybe : DiagGroup<"conditional-uninitialized">;
+def UninitializedSometimes : DiagGroup<"sometimes-uninitialized">;
+def Uninitialized  : DiagGroup<"uninitialized", [UninitializedSometimes]>;
 def UnknownPragmas : DiagGroup<"unknown-pragmas">;
 def NSobjectAttribute : DiagGroup<"NSObject-attribute">;
 def UnknownAttributes : DiagGroup<"attributes">;
@@ -226,6 +235,7 @@ def UnusedComparison : DiagGroup<"unused-comparison">;
 def UnusedExceptionParameter : DiagGroup<"unused-exception-parameter">;
 def UnneededInternalDecl : DiagGroup<"unneeded-internal-declaration">;
 def UnneededMemberFunction : DiagGroup<"unneeded-member-function">;
+def UnusedPrivateField : DiagGroup<"unused-private-field">;
 def UnusedFunction : DiagGroup<"unused-function", [UnneededInternalDecl]>;
 def UnusedMemberFunction : DiagGroup<"unused-member-function",
                                      [UnneededMemberFunction]>;
@@ -307,6 +317,7 @@ def Unused : DiagGroup<"unused",
                        [UnusedArgument, UnusedFunction, UnusedLabel,
                         // UnusedParameter, (matches GCC's behavior)
                         // UnusedMemberFunction, (clean-up llvm before enabling)
+                        UnusedPrivateField,
                         UnusedValue, UnusedVariable]>,
                         DiagCategory<"Unused Entity Issue">;
 

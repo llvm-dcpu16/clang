@@ -136,7 +136,7 @@ private:
   mutable unsigned HasRedeclaration : 1;
 
   // NOTE: VC++ treats enums as signed, avoid using ImplementationControl enum
-  /// @required/@optional
+  /// \@required/\@optional
   unsigned DeclImplementation : 2;
 
   // NOTE: VC++ treats enums as signed, avoid using the ObjCDeclQualifier enum
@@ -171,7 +171,7 @@ private:
   unsigned NumParams;
 
   /// List of attributes for this method declaration.
-  SourceLocation EndLoc; // the location of the ';' or '}'.
+  SourceLocation DeclEndLoc; // the location of the ';' or '{'.
 
   // The following are only used for method definitions, null otherwise.
   // FIXME: space savings opportunity, consider a sub-class.
@@ -242,7 +242,7 @@ private:
     SelLocsKind(SelLoc_StandardNoSpace), IsOverriding(0),
     MethodDeclType(T), ResultTInfo(ResultTInfo),
     ParamsAndSelLocs(0), NumParams(0),
-    EndLoc(endLoc), Body(0), SelfDecl(0), CmdDecl(0) {
+    DeclEndLoc(endLoc), Body(0), SelfDecl(0), CmdDecl(0) {
     setImplicit(isImplicitlyDeclared);
   }
 
@@ -290,12 +290,16 @@ public:
   bool isRedeclaration() const { return IsRedeclaration; }
   void setAsRedeclaration(const ObjCMethodDecl *PrevMethod);
 
+  /// \brief Returns the location where the declarator ends. It will be
+  /// the location of ';' for a method declaration and the location of '{'
+  /// for a method definition.
+  SourceLocation getDeclaratorEndLoc() const { return DeclEndLoc; }
+
   // Location information, modeled after the Stmt API.
   SourceLocation getLocStart() const LLVM_READONLY { return getLocation(); }
-  SourceLocation getLocEnd() const LLVM_READONLY { return EndLoc; }
-  void setEndLoc(SourceLocation Loc) { EndLoc = Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY;
   virtual SourceRange getSourceRange() const LLVM_READONLY {
-    return SourceRange(getLocation(), EndLoc);
+    return SourceRange(getLocation(), getLocEnd());
   }
 
   SourceLocation getSelectorStartLoc() const {
@@ -310,7 +314,7 @@ public:
                                    getSelLocsKind() == SelLoc_StandardWithSpace,
                       llvm::makeArrayRef(const_cast<ParmVarDecl**>(getParams()),
                                          NumParams),
-                                   EndLoc);
+                                   DeclEndLoc);
     return getStoredSelLocs()[Index];
   }
 
@@ -415,7 +419,7 @@ public:
   bool isOverriding() const { return IsOverriding; }
   void setOverriding(bool isOverriding) { IsOverriding = isOverriding; }
   
-  // Related to protocols declared in  @protocol
+  // Related to protocols declared in  \@protocol
   void setDeclImplementation(ImplementationControl ic) {
     DeclImplementation = ic;
   }
@@ -547,24 +551,28 @@ public:
   }
 };
 
-/// ObjCInterfaceDecl - Represents an ObjC class declaration. For example:
+/// \brief Represents an ObjC class declaration.
 ///
+/// For example:
+///
+/// \code
 ///   // MostPrimitive declares no super class (not particularly useful).
-///   @interface MostPrimitive
+///   \@interface MostPrimitive
 ///     // no instance variables or methods.
-///   @end
+///   \@end
 ///
 ///   // NSResponder inherits from NSObject & implements NSCoding (a protocol).
-///   @interface NSResponder : NSObject <NSCoding>
+///   \@interface NSResponder : NSObject \<NSCoding>
 ///   { // instance variables are represented by ObjCIvarDecl.
 ///     id nextResponder; // nextResponder instance variable.
 ///   }
 ///   - (NSResponder *)nextResponder; // return a pointer to NSResponder.
 ///   - (void)mouseMoved:(NSEvent *)theEvent; // return void, takes a pointer
-///   @end                                    // to an NSEvent.
+///   \@end                                    // to an NSEvent.
+/// \endcode
 ///
-///   Unlike C/C++, forward class declarations are accomplished with @class.
-///   Unlike C/C++, @class allows for a list of classes to be forward declared.
+///   Unlike C/C++, forward class declarations are accomplished with \@class.
+///   Unlike C/C++, \@class allows for a list of classes to be forward declared.
 ///   Unlike C++, ObjC is a single-rooted class model. In Cocoa, classes
 ///   typically inherit from NSObject (an exception is NSProxy).
 ///
@@ -585,10 +593,10 @@ class ObjCInterfaceDecl : public ObjCContainerDecl
     /// Class's super class.
     ObjCInterfaceDecl *SuperClass;
 
-    /// Protocols referenced in the @interface  declaration
+    /// Protocols referenced in the \@interface  declaration
     ObjCProtocolList ReferencedProtocols;
 
-    /// Protocols reference in both the @interface and class extensions.
+    /// Protocols reference in both the \@interface and class extensions.
     ObjCList<ObjCProtocolDecl> AllReferencedProtocols;
 
     /// \brief List of categories and class extensions defined for this class.
@@ -818,21 +826,21 @@ public:
   bool hasDefinition() const { return Data; }
                         
   /// \brief Retrieve the definition of this class, or NULL if this class 
-  /// has been forward-declared (with @class) but not yet defined (with 
-  /// @interface).
+  /// has been forward-declared (with \@class) but not yet defined (with 
+  /// \@interface).
   ObjCInterfaceDecl *getDefinition() {
     return hasDefinition()? Data->Definition : 0;
   }
 
   /// \brief Retrieve the definition of this class, or NULL if this class 
-  /// has been forward-declared (with @class) but not yet defined (with 
-  /// @interface).
+  /// has been forward-declared (with \@class) but not yet defined (with 
+  /// \@interface).
   const ObjCInterfaceDecl *getDefinition() const {
     return hasDefinition()? Data->Definition : 0;
   }
 
   /// \brief Starts the definition of this Objective-C class, taking it from
-  /// a forward declaration (@class) to a definition (@interface).
+  /// a forward declaration (\@class) to a definition (\@interface).
   void startDefinition();
   
   ObjCInterfaceDecl *getSuperClass() const {
@@ -898,8 +906,8 @@ public:
   }
 
   /// isObjCRequiresPropertyDefs - Checks that a class or one of its super 
-  /// classes must not be auto-synthesized. Returns class decl. if it must not be;
-  /// 0, otherwise.
+  /// classes must not be auto-synthesized. Returns class decl. if it must not
+  /// be; 0, otherwise.
   const ObjCInterfaceDecl *isObjCRequiresPropertyDefs() const {
     const ObjCInterfaceDecl *Class = this;
     while (Class) {
@@ -947,8 +955,8 @@ public:
   SourceLocation getSuperClassLoc() const { return data().SuperClassLoc; }
 
   /// isImplicitInterfaceDecl - check that this is an implicitly declared
-  /// ObjCInterfaceDecl node. This is for legacy objective-c @implementation
-  /// declaration without an @interface declaration.
+  /// ObjCInterfaceDecl node. This is for legacy objective-c \@implementation
+  /// declaration without an \@interface declaration.
   bool isImplicitInterfaceDecl() const { 
     return hasDefinition() ? Data->Definition->isImplicit() : isImplicit(); 
   }
@@ -991,14 +999,14 @@ public:
 /// instance variables are identical to C. The only exception is Objective-C
 /// supports C++ style access control. For example:
 ///
-///   @interface IvarExample : NSObject
+///   \@interface IvarExample : NSObject
 ///   {
 ///     id defaultToProtected;
-///   @public:
+///   \@public:
 ///     id canBePublic; // same as C++.
-///   @protected:
+///   \@protected:
 ///     id canBeProtected; // same as C++.
-///   @package:
+///   \@package:
 ///     id canBePackage; // framework visibility (not available in C++).
 ///   }
 ///
@@ -1016,7 +1024,7 @@ private:
                QualType T, TypeSourceInfo *TInfo, AccessControl ac, Expr *BW,
                bool synthesized)
     : FieldDecl(ObjCIvar, DC, StartLoc, IdLoc, Id, T, TInfo, BW,
-                /*Mutable=*/false, /*HasInit=*/false),
+                /*Mutable=*/false, /*HasInit=*/ICIS_NoInit),
       NextIvar(0), DeclAccess(ac), Synthesized(synthesized) {}
 
 public:
@@ -1065,8 +1073,7 @@ private:
 };
 
 
-/// ObjCAtDefsFieldDecl - Represents a field declaration created by an
-///  @defs(...).
+/// \brief Represents a field declaration created by an \@defs(...).
 class ObjCAtDefsFieldDecl : public FieldDecl {
   virtual void anchor();
   ObjCAtDefsFieldDecl(DeclContext *DC, SourceLocation StartLoc,
@@ -1074,7 +1081,7 @@ class ObjCAtDefsFieldDecl : public FieldDecl {
                       QualType T, Expr *BW)
     : FieldDecl(ObjCAtDefsField, DC, StartLoc, IdLoc, Id, T,
                 /*TInfo=*/0, // FIXME: Do ObjCAtDefs have declarators ?
-                BW, /*Mutable=*/false, /*HasInit=*/false) {}
+                BW, /*Mutable=*/false, /*HasInit=*/ICIS_NoInit) {}
 
 public:
   static ObjCAtDefsFieldDecl *Create(ASTContext &C, DeclContext *DC,
@@ -1090,29 +1097,35 @@ public:
   static bool classofKind(Kind K) { return K == ObjCAtDefsField; }
 };
 
-/// ObjCProtocolDecl - Represents a protocol declaration. ObjC protocols
-/// declare a pure abstract type (i.e no instance variables are permitted).
-/// Protocols originally drew inspiration from C++ pure virtual functions (a C++
-/// feature with nice semantics and lousy syntax:-). Here is an example:
+/// \brief Represents an Objective-C protocol declaration.
 ///
-/// @protocol NSDraggingInfo <refproto1, refproto2>
+/// Objective-C protocols declare a pure abstract type (i.e., no instance
+/// variables are permitted).  Protocols originally drew inspiration from
+/// C++ pure virtual functions (a C++ feature with nice semantics and lousy
+/// syntax:-). Here is an example:
+///
+/// \code
+/// \@protocol NSDraggingInfo <refproto1, refproto2>
 /// - (NSWindow *)draggingDestinationWindow;
 /// - (NSImage *)draggedImage;
-/// @end
+/// \@end
+/// \endcode
 ///
 /// This says that NSDraggingInfo requires two methods and requires everything
 /// that the two "referenced protocols" 'refproto1' and 'refproto2' require as
 /// well.
 ///
-/// @interface ImplementsNSDraggingInfo : NSObject <NSDraggingInfo>
-/// @end
+/// \code
+/// \@interface ImplementsNSDraggingInfo : NSObject \<NSDraggingInfo>
+/// \@end
+/// \endcode
 ///
 /// ObjC protocols inspired Java interfaces. Unlike Java, ObjC classes and
 /// protocols are in distinct namespaces. For example, Cocoa defines both
 /// an NSObject protocol and class (which isn't allowed in Java). As a result,
 /// protocols are referenced using angle brackets as follows:
 ///
-/// id <NSDraggingInfo> anyObjectThatImplementsNSDraggingInfo;
+/// id \<NSDraggingInfo> anyObjectThatImplementsNSDraggingInfo;
 ///
 class ObjCProtocolDecl : public ObjCContainerDecl,
                          public Redeclarable<ObjCProtocolDecl> {
@@ -1274,9 +1287,9 @@ public:
 /// you to add instance data. The following example adds "myMethod" to all
 /// NSView's within a process:
 ///
-/// @interface NSView (MyViewMethods)
+/// \@interface NSView (MyViewMethods)
 /// - myMethod;
-/// @end
+/// \@end
 ///
 /// Categories also allow you to split the implementation of a class across
 /// several files (a feature more naturally supported in C++).
@@ -1450,16 +1463,16 @@ public:
 };
 
 /// ObjCCategoryImplDecl - An object of this class encapsulates a category
-/// @implementation declaration. If a category class has declaration of a
+/// \@implementation declaration. If a category class has declaration of a
 /// property, its implementation must be specified in the category's
-/// @implementation declaration. Example:
-/// @interface I @end
-/// @interface I(CATEGORY)
-///    @property int p1, d1;
-/// @end
-/// @implementation I(CATEGORY)
-///  @dynamic p1,d1;
-/// @end
+/// \@implementation declaration. Example:
+/// \@interface I \@end
+/// \@interface I(CATEGORY)
+///    \@property int p1, d1;
+/// \@end
+/// \@implementation I(CATEGORY)
+///  \@dynamic p1,d1;
+/// \@end
 ///
 /// ObjCCategoryImplDecl
 class ObjCCategoryImplDecl : public ObjCImplDecl {
@@ -1542,9 +1555,9 @@ raw_ostream &operator<<(raw_ostream &OS, const ObjCCategoryImplDecl &CID);
 /// method definitions are specified. For example:
 ///
 /// @code
-/// @implementation MyClass
+/// \@implementation MyClass
 /// - (void)myMethod { /* do something */ }
-/// @end
+/// \@end
 /// @endcode
 ///
 /// Typically, instance variables are specified in the class interface,
@@ -1556,7 +1569,7 @@ class ObjCImplementationDecl : public ObjCImplDecl {
   virtual void anchor();
   /// Implementation Class's super class.
   ObjCInterfaceDecl *SuperClass;
-  /// @implementation may have private ivars.
+  /// \@implementation may have private ivars.
   SourceLocation IvarLBraceLoc;
   SourceLocation IvarRBraceLoc;
   
@@ -1568,7 +1581,7 @@ class ObjCImplementationDecl : public ObjCImplDecl {
   /// true if class has a .cxx_[construct,destruct] method.
   bool HasCXXStructors : 1;
 
-  /// true of class extension has at least one bitfield ivar.
+  /// true if class extension has at least one bitfield ivar.
   bool HasSynthBitfield : 1;
 
   ObjCImplementationDecl(DeclContext *DC,
@@ -1698,7 +1711,7 @@ public:
 raw_ostream &operator<<(raw_ostream &OS, const ObjCImplementationDecl &ID);
 
 /// ObjCCompatibleAliasDecl - Represents alias of a class. This alias is
-/// declared as @compatibility_alias alias class.
+/// declared as \@compatibility_alias alias class.
 class ObjCCompatibleAliasDecl : public NamedDecl {
   virtual void anchor();
   /// Class that this is an alias of.
@@ -1725,10 +1738,12 @@ public:
 
 };
 
-/// ObjCPropertyDecl - Represents one property declaration in an interface.
-/// For example:
-/// @property (assign, readwrite) int MyProperty;
+/// \brief Represents one property declaration in an Objective-C interface.
 ///
+/// For example:
+/// \code{.mm}
+/// \@property (assign, readwrite) int MyProperty;
+/// \endcode
 class ObjCPropertyDecl : public NamedDecl {
   virtual void anchor();
 public:
@@ -1757,12 +1772,12 @@ public:
   enum SetterKind { Assign, Retain, Copy, Weak };
   enum PropertyControl { None, Required, Optional };
 private:
-  SourceLocation AtLoc;   // location of @property
+  SourceLocation AtLoc;   // location of \@property
   SourceLocation LParenLoc; // location of '(' starting attribute list or null.
   TypeSourceInfo *DeclType;
   unsigned PropertyAttributes : NumPropertyAttrsBits;
   unsigned PropertyAttributesAsWritten : NumPropertyAttrsBits;
-  // @required/@optional
+  // \@required/\@optional
   unsigned PropertyImplementation : 2;
 
   Selector GetterName;    // getter name of NULL if no getter
@@ -1874,7 +1889,7 @@ public:
   ObjCMethodDecl *getSetterMethodDecl() const { return SetterMethodDecl; }
   void setSetterMethodDecl(ObjCMethodDecl *gDecl) { SetterMethodDecl = gDecl; }
 
-  // Related to @optional/@required declared in @protocol
+  // Related to \@optional/\@required declared in \@protocol
   void setPropertyImplementation(PropertyControl pc) {
     PropertyImplementation = pc;
   }
@@ -1904,7 +1919,7 @@ public:
 
 /// ObjCPropertyImplDecl - Represents implementation declaration of a property
 /// in a class or category implementation block. For example:
-/// @synthesize prop1 = ivar1;
+/// \@synthesize prop1 = ivar1;
 ///
 class ObjCPropertyImplDecl : public Decl {
 public:
@@ -1913,26 +1928,27 @@ public:
     Dynamic
   };
 private:
-  SourceLocation AtLoc;   // location of @synthesize or @dynamic
+  SourceLocation AtLoc;   // location of \@synthesize or \@dynamic
 
-  /// \brief For @synthesize, the location of the ivar, if it was written in
+  /// \brief For \@synthesize, the location of the ivar, if it was written in
   /// the source code.
   ///
   /// \code
-  /// @synthesize int a = b
+  /// \@synthesize int a = b
   /// \endcode
   SourceLocation IvarLoc;
 
   /// Property declaration being implemented
   ObjCPropertyDecl *PropertyDecl;
 
-  /// Null for @dynamic. Required for @synthesize.
+  /// Null for \@dynamic. Required for \@synthesize.
   ObjCIvarDecl *PropertyIvarDecl;
 
-  /// Null for @dynamic. Non-null if property must be copy-constructed in getter
+  /// Null for \@dynamic. Non-null if property must be copy-constructed in
+  /// getter.
   Expr *GetterCXXConstructor;
 
-  /// Null for @dynamic. Non-null if property has assignment operator to call
+  /// Null for \@dynamic. Non-null if property has assignment operator to call
   /// in Setter synthesis.
   Expr *SetterCXXAssignment;
 
@@ -1980,6 +1996,17 @@ public:
                            SourceLocation IvarLoc) {
     PropertyIvarDecl = Ivar;
     this->IvarLoc = IvarLoc;
+  }
+
+  /// \brief For \@synthesize, returns true if an ivar name was explicitly
+  /// specified.
+  ///
+  /// \code
+  /// \@synthesize int a = b; // true
+  /// \@synthesize int a; // false
+  /// \endcode
+  bool isIvarNameSpecified() const {
+    return IvarLoc.isValid() && IvarLoc != getLocation();
   }
 
   Expr *getGetterCXXConstructor() const {

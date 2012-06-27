@@ -1,5 +1,7 @@
-// RUN: %clang_cc1 -analyze -analyzer-checker=core,experimental.deadcode.UnreachableCode,experimental.core.CastSize,unix.Malloc -analyzer-store=region -verify %s
+// RUN: %clang_cc1 -analyze -analyzer-checker=core,experimental.deadcode.UnreachableCode,experimental.core.CastSize,unix.Malloc,debug.ExprInspection -analyzer-store=region -verify %s
 #include "system-header-simulator.h"
+
+void clang_analyzer_eval(int);
 
 typedef __typeof(sizeof(int)) size_t;
 void *malloc(size_t);
@@ -8,6 +10,8 @@ void free(void *);
 void *realloc(void *ptr, size_t size);
 void *reallocf(void *ptr, size_t size);
 void *calloc(size_t nmemb, size_t size);
+char *strdup(const char *s);
+char *strndup(const char *s, size_t n);
 
 void myfoo(int *p);
 void myfooint(int p);
@@ -241,6 +245,12 @@ void f7() {
   char *x = (char*) malloc(4);
   free(x);
   x[0] = 'a'; // expected-warning{{Use of memory after it is freed}}
+}
+
+void f8() {
+  char *x = (char*) malloc(4);
+  free(x);
+  char *y = strndup(x, 4); // expected-warning{{Use of memory after it is freed}}
 }
 
 void f7_realloc() {
@@ -653,10 +663,6 @@ int *specialMallocWithStruct() {
 }
 
 // Test various allocation/deallocation functions.
-
-char *strdup(const char *s);
-char *strndup(const char *s, size_t n);
-
 void testStrdup(const char *s, unsigned validIndex) {
   char *s2 = strdup(s);
   s2[validIndex + 1] = 'b';// expected-warning {{Memory is never released; potential leak}}
@@ -835,10 +841,8 @@ int fPtr(unsigned cond, int x) {
   return (cond ? mySub : myAdd)(x, x);
 }
 
-// ----------------------------------------------------------------------------
-// Below are the known false positives.
+// Test anti-aliasing.
 
-// TODO: There should be no warning here. This one might be difficult to get rid of.
 void dependsOnValueOfPtr(int *g, unsigned f) {
   int *p;
 
@@ -851,8 +855,63 @@ void dependsOnValueOfPtr(int *g, unsigned f) {
   if (p != g)
     free(p);
   else
-    return; // expected-warning{{Memory is never released; potential leak}}
+    return; // no warning
   return;
+}
+
+int CMPRegionHeapToStack() {
+  int x = 0;
+  int *x1 = malloc(8);
+  int *x2 = &x;
+  clang_analyzer_eval(x1 == x2); // expected-warning{{FALSE}}
+  free(x1);
+  return x;
+}
+
+int CMPRegionHeapToHeap2() {
+  int x = 0;
+  int *x1 = malloc(8);
+  int *x2 = malloc(8);
+  int *x4 = x1;
+  int *x5 = x2;
+  clang_analyzer_eval(x4 == x5); // expected-warning{{FALSE}}
+  free(x1);
+  free(x2);
+  return x;
+}
+
+int CMPRegionHeapToHeap() {
+  int x = 0;
+  int *x1 = malloc(8);
+  int *x4 = x1;
+  if (x1 == x4) {
+    free(x1);
+    return 5/x; // expected-warning{{Division by zero}}
+  }
+  return x;// expected-warning{{This statement is never executed}}
+}
+
+int HeapAssignment() {
+  int m = 0;
+  int *x = malloc(4);
+  int *y = x;
+  *x = 5;
+  clang_analyzer_eval(*x != *y); // expected-warning{{FALSE}}
+  free(x);
+  return 0;
+}
+
+int *retPtr();
+int *retPtrMightAlias(int *x);
+int cmpHeapAllocationToUnknown() {
+  int zero = 0;
+  int *yBefore = retPtr();
+  int *m = malloc(8);
+  int *yAfter = retPtrMightAlias(m);
+  clang_analyzer_eval(yBefore == m); // expected-warning{{FALSE}}
+  clang_analyzer_eval(yAfter == m); // expected-warning{{FALSE}}
+  free(m);
+  return 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -894,5 +953,37 @@ void test_double_assign_ints_positive()
 {
   void *ptr = malloc(16);
   (void*)(long)(unsigned long)ptr; // expected-warning {{unused}} expected-warning {{leak}}
+}
+
+
+void testCGContextNoLeak()
+{
+  void *ptr = malloc(16);
+  CGContextRef context = CGBitmapContextCreate(ptr);
+
+  // Because you can get the data back out like this, even much later,
+  // CGBitmapContextCreate is one of our "stop-tracking" exceptions.
+  free(CGBitmapContextGetData(context));
+}
+
+void testCGContextLeak()
+{
+  void *ptr = malloc(16);
+  CGContextRef context = CGBitmapContextCreate(ptr);
+  // However, this time we're just leaking the data, because the context
+  // object doesn't escape and it hasn't been freed in this function.
+}
+
+// Allow xpc context to escape. radar://11635258
+// TODO: Would be great if we checked that the finalize_connection_context actually releases it.
+static void finalize_connection_context(void *ctx) {
+  int *context = ctx;
+  free(context);
+}
+void foo (xpc_connection_t peer) {
+  int *ctx = calloc(1, sizeof(int));
+  xpc_connection_set_context(peer, ctx);
+  xpc_connection_set_finalizer_f(peer, finalize_connection_context);
+  xpc_connection_resume(peer);
 }
 
