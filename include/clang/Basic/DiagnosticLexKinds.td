@@ -64,9 +64,12 @@ def ext_token_used : Extension<"extension used">,
 def warn_cxx11_keyword : Warning<"'%0' is a keyword in C++11">,
   InGroup<CXX11Compat>, DefaultIgnore;
 
-def warn_unterminated_string : ExtWarn<"missing terminating '\"' character">;
-def warn_unterminated_char : ExtWarn<"missing terminating ' character">;
-def err_empty_character : Error<"empty character constant">;
+def ext_unterminated_string : ExtWarn<"missing terminating '\"' character">,
+  InGroup<InvalidPPToken>;
+def ext_unterminated_char : ExtWarn<"missing terminating ' character">,
+  InGroup<InvalidPPToken>;
+def ext_empty_character : ExtWarn<"empty character constant">,
+  InGroup<InvalidPPToken>;
 def err_unterminated_block_comment : Error<"unterminated /* comment">;
 def err_invalid_character_to_charify : Error<
   "invalid argument to convert to character">;
@@ -415,6 +418,9 @@ def err_pp_illegal_floating_literal : Error<
   "floating point literal in preprocessor expression">;
 def err_pp_line_requires_integer : Error<
   "#line directive requires a positive integer argument">;
+def ext_pp_line_zero : Extension<
+  "#line directive with zero argument is a GNU extension">, 
+  InGroup<GNU>;
 def err_pp_line_invalid_filename : Error<
   "invalid filename for #line directive">;
 def warn_pp_line_decimal : Warning<

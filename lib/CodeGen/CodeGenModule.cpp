@@ -138,8 +138,8 @@ void CodeGenModule::createObjCRuntime() {
   // This is just isGNUFamily(), but we want to force implementors of
   // new ABIs to decide how best to do this.
   switch (LangOpts.ObjCRuntime.getKind()) {
-  case ObjCRuntime::GNU:
-  case ObjCRuntime::FragileGNU:
+  case ObjCRuntime::GNUstep:
+  case ObjCRuntime::GCC:
     ObjCRuntime = CreateGNUObjCRuntime(*this);
     return;
 
@@ -256,6 +256,45 @@ void CodeGenModule::setGlobalVisibility(llvm::GlobalValue *GV,
   NamedDecl::LinkageInfo LV = D->getLinkageAndVisibility();
   if (LV.visibilityExplicit() || !GV->hasAvailableExternallyLinkage())
     GV->setVisibility(GetLLVMVisibility(LV.visibility()));
+}
+
+static llvm::GlobalVariable::ThreadLocalMode GetLLVMTLSModel(StringRef S) {
+  return llvm::StringSwitch<llvm::GlobalVariable::ThreadLocalMode>(S)
+      .Case("global-dynamic", llvm::GlobalVariable::GeneralDynamicTLSModel)
+      .Case("local-dynamic", llvm::GlobalVariable::LocalDynamicTLSModel)
+      .Case("initial-exec", llvm::GlobalVariable::InitialExecTLSModel)
+      .Case("local-exec", llvm::GlobalVariable::LocalExecTLSModel);
+}
+
+static llvm::GlobalVariable::ThreadLocalMode GetLLVMTLSModel(
+    CodeGenOptions::TLSModel M) {
+  switch (M) {
+  case CodeGenOptions::GeneralDynamicTLSModel:
+    return llvm::GlobalVariable::GeneralDynamicTLSModel;
+  case CodeGenOptions::LocalDynamicTLSModel:
+    return llvm::GlobalVariable::LocalDynamicTLSModel;
+  case CodeGenOptions::InitialExecTLSModel:
+    return llvm::GlobalVariable::InitialExecTLSModel;
+  case CodeGenOptions::LocalExecTLSModel:
+    return llvm::GlobalVariable::LocalExecTLSModel;
+  }
+  llvm_unreachable("Invalid TLS model!");
+}
+
+void CodeGenModule::setTLSMode(llvm::GlobalVariable *GV,
+                               const VarDecl &D) const {
+  assert(D.isThreadSpecified() && "setting TLS mode on non-TLS var!");
+
+  llvm::GlobalVariable::ThreadLocalMode TLM;
+  TLM = GetLLVMTLSModel(CodeGenOpts.DefaultTLSModel);
+
+  // Override the TLS model if it is explicitly specified.
+  if (D.hasAttr<TLSModelAttr>()) {
+    const TLSModelAttr *Attr = D.getAttr<TLSModelAttr>();
+    TLM = GetLLVMTLSModel(Attr->getModel());
+  }
+
+  GV->setThreadLocalMode(TLM);
 }
 
 /// Set the symbol visibility of type information (vtable and RTTI)
@@ -507,7 +546,7 @@ static bool hasUnwindExceptions(const LangOptions &LangOpts) {
 
   // If ObjC exceptions are enabled, this depends on the ABI.
   if (LangOpts.ObjCExceptions) {
-    if (LangOpts.ObjCRuntime.isFragile()) return false;
+    return LangOpts.ObjCRuntime.hasUnwindExceptions();
   }
 
   return true;
@@ -1072,6 +1111,7 @@ CodeGenModule::GetOrCreateLLVMFunction(StringRef MangledName,
   } else if (getLangOpts().CPlusPlus && D.getDecl()) {
     // Look for a declaration that's lexically in a record.
     const FunctionDecl *FD = cast<FunctionDecl>(D.getDecl());
+    FD = FD->getMostRecentDecl();
     do {
       if (isa<CXXRecordDecl>(FD->getLexicalDeclContext())) {
         if (FD->isImplicit() && !ForVTable) {
@@ -1212,13 +1252,8 @@ CodeGenModule::GetOrCreateLLVMGlobal(StringRef MangledName,
         GV->setVisibility(GetLLVMVisibility(LV.visibility()));
     }
 
-    GV->setThreadLocal(D->isThreadSpecified());
-
-    // Set the TLS model if it it's explicitly specified.
-    if (D->hasAttr<TLSModelAttr>()) {
-      const TLSModelAttr *Attr = D->getAttr<TLSModelAttr>();
-      GV->setThreadLocalMode(GetLLVMTLSModel(Attr->getModel()));
-    }
+    if (D->isThreadSpecified())
+      setTLSMode(GV, *D);
   }
 
   if (AddrSpace != Ty->getAddressSpace())

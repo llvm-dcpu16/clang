@@ -4461,6 +4461,9 @@ QualType ASTReader::GetType(TypeID ID) {
       T = Context.ARCUnbridgedCastTy;
       break;
 
+    case PREDEF_TYPE_VA_LIST_TAG:
+      T = Context.getVaListTagType();
+      break;
     }
 
     assert(!T.isNull() && "Unknown predefined type");
@@ -4670,7 +4673,9 @@ Decl *ASTReader::GetDecl(DeclID ID) {
   unsigned Index = ID - NUM_PREDEF_DECL_IDS;
 
   if (Index >= DeclsLoaded.size()) {
+    assert(0 && "declaration ID out-of-range for AST file");
     Error("declaration ID out-of-range for AST file");
+    return 0;
   }
   
   if (!DeclsLoaded[Index]) {

@@ -649,8 +649,7 @@ bool Sema::variadicArgumentPODCheck(const Expr *E, VariadicCallType CT) {
 /// interfaces passed by value.
 ExprResult Sema::DefaultVariadicArgumentPromotion(Expr *E, VariadicCallType CT,
                                                   FunctionDecl *FDecl) {
-  const QualType &Ty = E->getType();
-  if (const BuiltinType *PlaceholderTy = Ty->getAsPlaceholderType()) {
+  if (const BuiltinType *PlaceholderTy = E->getType()->getAsPlaceholderType()) {
     // Strip the unbridged-cast placeholder expression off, if applicable.
     if (PlaceholderTy->getKind() == BuiltinType::ARCUnbridgedCast &&
         (CT == VariadicMethod ||
@@ -671,15 +670,15 @@ ExprResult Sema::DefaultVariadicArgumentPromotion(Expr *E, VariadicCallType CT,
     return ExprError();
   E = ExprRes.take();
 
-  if (Ty->isObjCObjectType() &&
+  if (E->getType()->isObjCObjectType() &&
     DiagRuntimeBehavior(E->getLocStart(), 0,
                         PDiag(diag::err_cannot_pass_objc_interface_to_vararg)
-                          << Ty << CT))
+                          << E->getType() << CT))
     return ExprError();
 
   // Diagnostics regarding non-POD argument types are
   // emitted along with format string checking in Sema::CheckFunctionCall().
-  if (isValidVarArgType(Ty) == VAK_Invalid) {
+  if (isValidVarArgType(E->getType()) == VAK_Invalid) {
     // Turn this into a trap.
     CXXScopeSpec SS;
     SourceLocation TemplateKWLoc;
@@ -2499,7 +2498,7 @@ ExprResult Sema::ActOnPredefinedExpr(SourceLocation Loc, tok::TokenKind Kind) {
     unsigned Length = PredefinedExpr::ComputeName(IT, currentDecl).length();
 
     llvm::APInt LengthI(32, Length + 1);
-    if (Kind == tok::kw_L__FUNCTION__)
+    if (IT == PredefinedExpr::LFunction)
       ResTy = Context.WCharTy.withConst();
     else
       ResTy = Context.CharTy.withConst();
@@ -7559,7 +7558,27 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
   return true;
 }
 
+static void CheckIdentityFieldAssignment(Expr *LHSExpr, Expr *RHSExpr,
+                                         SourceLocation Loc,
+                                         Sema &Sema) {
+  // C / C++ fields
+  MemberExpr *ML = dyn_cast<MemberExpr>(LHSExpr);
+  MemberExpr *MR = dyn_cast<MemberExpr>(RHSExpr);
+  if (ML && MR && ML->getMemberDecl() == MR->getMemberDecl()) {
+    if (isa<CXXThisExpr>(ML->getBase()) && isa<CXXThisExpr>(MR->getBase()))
+      Sema.Diag(Loc, diag::warn_identity_field_assign) << 0;
+  }
 
+  // Objective-C instance variables
+  ObjCIvarRefExpr *OL = dyn_cast<ObjCIvarRefExpr>(LHSExpr);
+  ObjCIvarRefExpr *OR = dyn_cast<ObjCIvarRefExpr>(RHSExpr);
+  if (OL && OR && OL->getDecl() == OR->getDecl()) {
+    DeclRefExpr *RL = dyn_cast<DeclRefExpr>(OL->getBase()->IgnoreImpCasts());
+    DeclRefExpr *RR = dyn_cast<DeclRefExpr>(OR->getBase()->IgnoreImpCasts());
+    if (RL && RR && RL->getDecl() == RR->getDecl())
+      Sema.Diag(Loc, diag::warn_identity_field_assign) << 1;
+  }
+}
 
 // C99 6.5.16.1
 QualType Sema::CheckAssignmentOperands(Expr *LHSExpr, ExprResult &RHS,
@@ -7576,6 +7595,10 @@ QualType Sema::CheckAssignmentOperands(Expr *LHSExpr, ExprResult &RHS,
                                              CompoundType;
   AssignConvertType ConvTy;
   if (CompoundType.isNull()) {
+    Expr *RHSCheck = RHS.get();
+
+    CheckIdentityFieldAssignment(LHSExpr, RHSCheck, Loc, *this);
+
     QualType LHSTy(LHSType);
     ConvTy = CheckSingleAssignmentConstraints(LHSTy, RHS);
     if (RHS.isInvalid())
@@ -7596,7 +7619,6 @@ QualType Sema::CheckAssignmentOperands(Expr *LHSExpr, ExprResult &RHS,
     // If the RHS is a unary plus or minus, check to see if they = and + are
     // right next to each other.  If so, the user may have typo'd "x =+ 4"
     // instead of "x += 4".
-    Expr *RHSCheck = RHS.get();
     if (ImplicitCastExpr *ICE = dyn_cast<ImplicitCastExpr>(RHSCheck))
       RHSCheck = ICE->getSubExpr();
     if (UnaryOperator *UO = dyn_cast<UnaryOperator>(RHSCheck)) {
@@ -9328,7 +9350,10 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
   PopExpressionEvaluationContext();
 
   BlockScopeInfo *BSI = cast<BlockScopeInfo>(FunctionScopes.back());
-  
+
+  if (BSI->HasImplicitReturnType)
+    deduceClosureReturnType(*BSI);
+
   PopDeclContext();
 
   QualType RetTy = Context.VoidTy;
@@ -9401,7 +9426,12 @@ ExprResult Sema::ActOnBlockStmtExpr(SourceLocation CaretLoc,
 
   BSI->TheDecl->setBody(cast<CompoundStmt>(Body));
 
-  computeNRVO(Body, getCurBlock());
+  // Try to apply the named return value optimization. We have to check again
+  // if we can do this, though, because blocks keep return statements around
+  // to deduce an implicit return type.
+  if (getLangOpts().CPlusPlus && RetTy->isRecordType() &&
+      !BSI->TheDecl->isDependentContext())
+    computeNRVO(Body, getCurBlock());
   
   BlockExpr *Result = new (Context) BlockExpr(BSI->TheDecl, BlockTy);
   const AnalysisBasedWarnings::Policy &WP = AnalysisWarnings.getDefaultPolicy();
@@ -10854,11 +10884,14 @@ static void MarkExprReferenced(Sema &SemaRef, SourceLocation Loc,
   if (!MD)
     return;
   const Expr *Base = ME->getBase();
-  const CXXRecordDecl *MostDerivedClassDecl
-    = Base->getMostDerivedClassDeclForType();
+  if (Base->getType()->isDependentType())
+    return;
+  const CXXRecordDecl *MostDerivedClassDecl = Base->getBestDynamicClassType();
   if (!MostDerivedClassDecl)
     return;
   CXXMethodDecl *DM = MD->getCorrespondingMethodInClass(MostDerivedClassDecl);
+  if (!DM)
+    return;
   SemaRef.MarkAnyDeclReferenced(Loc, DM);
 } 
 

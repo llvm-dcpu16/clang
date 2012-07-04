@@ -20,29 +20,11 @@
 #include <time.h>
 #include <stdio.h>
 
+#include "clang-c/Platform.h"
+#include "clang-c/CXString.h"
+
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-/* MSVC DLL import/export. */
-#ifdef _MSC_VER
-  #ifdef _CINDEX_LIB_
-    #define CINDEX_LINKAGE __declspec(dllexport)
-  #else
-    #define CINDEX_LINKAGE __declspec(dllimport)
-  #endif
-#else
-  #define CINDEX_LINKAGE
-#endif
-
-#ifdef __GNUC__
-  #define CINDEX_DEPRECATED __attribute__((deprecated))
-#else
-  #ifdef _MSC_VER
-    #define CINDEX_DEPRECATED __declspec(deprecated)
-  #else
-    #define CINDEX_DEPRECATED
-  #endif
 #endif
 
 /** \defgroup CINDEX libclang: C Interface to Clang
@@ -156,39 +138,6 @@ typedef struct CXVersion {
   int Subminor;
 } CXVersion;
   
-/**
- * \defgroup CINDEX_STRING String manipulation routines
- *
- * @{
- */
-
-/**
- * \brief A character string.
- *
- * The \c CXString type is used to return strings from the interface when
- * the ownership of that string might different from one call to the next.
- * Use \c clang_getCString() to retrieve the string data and, once finished
- * with the string data, call \c clang_disposeString() to free the string.
- */
-typedef struct {
-  void *data;
-  unsigned private_flags;
-} CXString;
-
-/**
- * \brief Retrieve the character data associated with the given string.
- */
-CINDEX_LINKAGE const char *clang_getCString(CXString string);
-
-/**
- * \brief Free the given string,
- */
-CINDEX_LINKAGE void clang_disposeString(CXString string);
-
-/**
- * @}
- */
-
 /**
  * \brief Provides a shared context for creating translation units.
  *
@@ -1109,7 +1058,14 @@ enum CXTranslationUnit_Flags {
    * This option can be used to search for declarations/definitions while
    * ignoring the usages.
    */
-  CXTranslationUnit_SkipFunctionBodies = 0x40
+  CXTranslationUnit_SkipFunctionBodies = 0x40,
+
+  /**
+   * \brief Used to indicate that brief documentation comments should be
+   * included into the set of code completions returned from this translation
+   * unit.
+   */
+  CXTranslationUnit_IncludeBriefCommentsInCodeCompletion = 0x80
 };
 
 /**
@@ -3188,6 +3144,19 @@ CINDEX_LINKAGE CXCursor clang_getCanonicalCursor(CXCursor);
 CINDEX_LINKAGE int clang_Cursor_getObjCSelectorIndex(CXCursor);
 
 /**
+ * \brief Given a cursor pointing to a C++ method call or an ObjC message,
+ * returns non-zero if the method/message is "dynamic", meaning:
+ * 
+ * For a C++ method: the call is virtual.
+ * For an ObjC message: the receiver is an object instance, not 'super' or a
+ * specific class.
+ * 
+ * If the method/message is "static" or the cursor does not point to a
+ * method/message, it will return zero.
+ */
+CINDEX_LINKAGE int clang_Cursor_isDynamicCall(CXCursor C);
+
+/**
  * \brief Given a cursor that represents a declaration, return the associated
  * comment's source range.  The range may include multiple consecutive comments
  * with whitespace in between.
@@ -3199,6 +3168,12 @@ CINDEX_LINKAGE CXSourceRange clang_Cursor_getCommentRange(CXCursor C);
  * comment text, including comment markers.
  */
 CINDEX_LINKAGE CXString clang_Cursor_getRawCommentText(CXCursor C);
+
+/**
+ * \brief Given a cursor that represents a declaration, return the associated
+ * \\brief paragraph; otherwise return the first paragraph.
+ */
+CINDEX_LINKAGE CXString clang_Cursor_getBriefCommentText(CXCursor C);
 
 /**
  * @}
@@ -3831,6 +3806,14 @@ clang_getCompletionAnnotation(CXCompletionString completion_string,
 CINDEX_LINKAGE CXString
 clang_getCompletionParent(CXCompletionString completion_string,
                           enum CXCursorKind *kind);
+
+/**
+ * \brief Retrieve the brief documentation comment attached to the declaration
+ * that corresponds to the given completion string.
+ */
+CINDEX_LINKAGE CXString
+clang_getCompletionBriefComment(CXCompletionString completion_string);
+
 /**
  * \brief Retrieve a completion string for an arbitrary declaration or macro
  * definition cursor.
@@ -3881,7 +3864,13 @@ enum CXCodeComplete_Flags {
    * \brief Whether to include code patterns for language constructs
    * within the set of code completions, e.g., for loops.
    */
-  CXCodeComplete_IncludeCodePatterns = 0x02
+  CXCodeComplete_IncludeCodePatterns = 0x02,
+
+  /**
+   * \brief Whether to include brief documentation within the set of code
+   * completions returned.
+   */
+  CXCodeComplete_IncludeBriefComments = 0x04
 };
 
 /**

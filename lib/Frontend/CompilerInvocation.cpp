@@ -307,6 +307,20 @@ static void CodeGenOptsToArgs(const CodeGenOptions &Opts, ToArgsList &Res) {
     Res.push_back("-disable-llvm-verifier");
   for (unsigned i = 0, e = Opts.BackendOptions.size(); i != e; ++i)
     Res.push_back("-backend-option", Opts.BackendOptions[i]);
+
+  switch (Opts.DefaultTLSModel) {
+  case CodeGenOptions::GeneralDynamicTLSModel:
+    break;
+  case CodeGenOptions::LocalDynamicTLSModel:
+    Res.push_back("-ftls-model=local-dynamic");
+    break;
+  case CodeGenOptions::InitialExecTLSModel:
+    Res.push_back("-ftls-model=initial-exec");
+    break;
+  case CodeGenOptions::LocalExecTLSModel:
+    Res.push_back("-ftls-model=local-exec");
+    break;
+  }
 }
 
 static void DependencyOutputOptsToArgs(const DependencyOutputOptions &Opts,
@@ -456,6 +470,18 @@ static void FileSystemOptsToArgs(const FileSystemOptions &Opts, ToArgsList &Res)
     Res.push_back("-working-directory", Opts.WorkingDir);
 }
 
+static void CodeCompleteOptionsToArgs(const CodeCompleteOptions &Opts,
+                                      ToArgsList &Res) {
+  if (Opts.IncludeMacros)
+    Res.push_back("-code-completion-macros");
+  if (Opts.IncludeCodePatterns)
+    Res.push_back("-code-completion-patterns");
+  if (!Opts.IncludeGlobals)
+    Res.push_back("-no-code-completion-globals");
+  if (Opts.IncludeBriefComments)
+    Res.push_back("-code-completion-brief-comments");
+}
+
 static void FrontendOptsToArgs(const FrontendOptions &Opts, ToArgsList &Res) {
   if (Opts.DisableFree)
     Res.push_back("-disable-free");
@@ -463,12 +489,6 @@ static void FrontendOptsToArgs(const FrontendOptions &Opts, ToArgsList &Res) {
     Res.push_back("-relocatable-pch");
   if (Opts.ShowHelp)
     Res.push_back("-help");
-  if (Opts.ShowMacrosInCodeCompletion)
-    Res.push_back("-code-completion-macros");
-  if (Opts.ShowCodePatternsInCodeCompletion)
-    Res.push_back("-code-completion-patterns");
-  if (!Opts.ShowGlobalSymbolsInCodeCompletion)
-    Res.push_back("-no-code-completion-globals");
   if (Opts.ShowStats)
     Res.push_back("-print-stats");
   if (Opts.ShowTimers)
@@ -496,6 +516,7 @@ static void FrontendOptsToArgs(const FrontendOptions &Opts, ToArgsList &Res) {
     Res.push_back("-arcmt-migrate");
     break;
   }
+  CodeCompleteOptionsToArgs(Opts.CodeCompleteOpts, Res);
   if (!Opts.MTMigrateDir.empty())
     Res.push_back("-mt-migrate-directory", Opts.MTMigrateDir);
   if (!Opts.ARCMTMigrateReportOut.empty())
@@ -788,7 +809,7 @@ static void LangOptsToArgs(const LangOptions &Opts, ToArgsList &Res) {
   
   if (Opts.AppleKext)
     Res.push_back("-fapple-kext");
-  
+
   if (Opts.getVisibilityMode() != DefaultVisibility) {
     Res.push_back("-fvisibility");
     if (Opts.getVisibilityMode() == HiddenVisibility) {
@@ -1256,6 +1277,22 @@ static bool ParseCodeGenArgs(CodeGenOptions &Opts, ArgList &Args, InputKind IK,
     }
   }
 
+  if (Arg *A = Args.getLastArg(OPT_ftlsmodel_EQ)) {
+    StringRef Name = A->getValue(Args);
+    unsigned Model = llvm::StringSwitch<unsigned>(Name)
+        .Case("global-dynamic", CodeGenOptions::GeneralDynamicTLSModel)
+        .Case("local-dynamic", CodeGenOptions::LocalDynamicTLSModel)
+        .Case("initial-exec", CodeGenOptions::InitialExecTLSModel)
+        .Case("local-exec", CodeGenOptions::LocalExecTLSModel)
+        .Default(~0U);
+    if (Model == ~0U) {
+      Diags.Report(diag::err_drv_invalid_value) << A->getAsString(Args) << Name;
+      Success = false;
+    } else {
+      Opts.DefaultTLSModel = static_cast<CodeGenOptions::TLSModel>(Model);
+    }
+  }
+
   return Success;
 }
 
@@ -1349,6 +1386,8 @@ bool clang::ParseDiagnosticArgs(DiagnosticOptions &Opts, ArgList &Args,
   Opts.ShowSourceRanges = Args.hasArg(OPT_fdiagnostics_print_source_range_info);
   Opts.ShowParseableFixits = Args.hasArg(OPT_fdiagnostics_parseable_fixits);
   Opts.VerifyDiagnostics = Args.hasArg(OPT_verify);
+  Opts.ElideType = !Args.hasArg(OPT_fno_elide_type);
+  Opts.ShowTemplateTree = Args.hasArg(OPT_fdiagnostics_show_template_tree);
   Opts.ErrorLimit = Args.getLastArgIntValue(OPT_ferror_limit, 0, Diags);
   Opts.MacroBacktraceLimit
     = Args.getLastArgIntValue(OPT_fmacro_backtrace_limit,
@@ -1485,11 +1524,6 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
   Opts.Plugins = Args.getAllArgValues(OPT_load);
   Opts.RelocatablePCH = Args.hasArg(OPT_relocatable_pch);
   Opts.ShowHelp = Args.hasArg(OPT_help);
-  Opts.ShowMacrosInCodeCompletion = Args.hasArg(OPT_code_completion_macros);
-  Opts.ShowCodePatternsInCodeCompletion
-    = Args.hasArg(OPT_code_completion_patterns);
-  Opts.ShowGlobalSymbolsInCodeCompletion
-    = !Args.hasArg(OPT_no_code_completion_globals);
   Opts.ShowStats = Args.hasArg(OPT_print_stats);
   Opts.ShowTimers = Args.hasArg(OPT_ftime_report);
   Opts.ShowVersion = Args.hasArg(OPT_version);
@@ -1499,6 +1533,16 @@ static InputKind ParseFrontendArgs(FrontendOptions &Opts, ArgList &Args,
   Opts.FixOnlyWarnings = Args.hasArg(OPT_fix_only_warnings);
   Opts.FixAndRecompile = Args.hasArg(OPT_fixit_recompile);
   Opts.FixToTemporaries = Args.hasArg(OPT_fixit_to_temp);
+
+  Opts.CodeCompleteOpts.IncludeMacros
+    = Args.hasArg(OPT_code_completion_macros);
+  Opts.CodeCompleteOpts.IncludeCodePatterns
+    = Args.hasArg(OPT_code_completion_patterns);
+  Opts.CodeCompleteOpts.IncludeGlobals
+    = !Args.hasArg(OPT_no_code_completion_globals);
+  Opts.CodeCompleteOpts.IncludeBriefComments
+    = Args.hasArg(OPT_code_completion_brief_comments);
+
   Opts.OverrideRecordLayoutsFile
     = Args.getLastArgValue(OPT_foverride_record_layout_EQ);
   if (const Arg *A = Args.getLastArg(OPT_arcmt_check,
@@ -1982,7 +2026,7 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.AccessControl = !Args.hasArg(OPT_fno_access_control);
   Opts.ElideConstructors = !Args.hasArg(OPT_fno_elide_constructors);
   Opts.MathErrno = Args.hasArg(OPT_fmath_errno);
-  Opts.InstantiationDepth = Args.getLastArgIntValue(OPT_ftemplate_depth, 1024,
+  Opts.InstantiationDepth = Args.getLastArgIntValue(OPT_ftemplate_depth, 512,
                                                     Diags);
   Opts.ConstexprCallDepth = Args.getLastArgIntValue(OPT_fconstexpr_depth, 512,
                                                     Diags);

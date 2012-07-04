@@ -23,6 +23,9 @@ def warn_variables_not_in_loop_body : Warning<
 def warn_identical_enum_values : Warning<
   "all elements of %0 are initialized with literals to value %1">,
   InGroup<DiagGroup<"unique-enum">>;
+def note_identical_enum_values : Note<
+  "initialize the last element with the previous element to silence "
+  "this warning">;
 
 // Constant expressions
 def err_expr_not_ice : Error<
@@ -169,6 +172,10 @@ def warn_used_but_marked_unused: Warning<"%0 was marked unused but was used">,
   InGroup<UsedButMarkedUnused>, DefaultIgnore;
 def warn_unneeded_internal_decl : Warning<
   "%select{function|variable}0 %1 is not needed and will not be emitted">,
+  InGroup<UnneededInternalDecl>, DefaultIgnore;
+def warn_unneeded_static_internal_decl : Warning<
+  "'static' function %0 declared in header file "
+  "should be declared 'static inline'">,
   InGroup<UnneededInternalDecl>, DefaultIgnore;
 def warn_unneeded_member_function : Warning<
   "member function %0 is not needed and will not be emitted">,
@@ -631,8 +638,8 @@ def warn_auto_synthesizing_protocol_property :Warning<
   " declared in a protocol">,
   InGroup<DiagGroup<"objc-protocol-property-synthesis">>;
 def warn_autosynthesis_property_ivar_match :Warning<
-  "autosynthesized property '%0' will use %select{|synthesized}1 instance variable "
-  "'%2', not existing instance variable '%3'">,
+  "autosynthesized property %0 will use %select{|synthesized}1 instance variable "
+  "%2, not existing instance variable %3">,
   InGroup<DiagGroup<"objc-autosynthesis-property-ivar-name-match">>;
 def warn_missing_explicit_synthesis : Warning <
   "auto property synthesis is synthesizing property not explicitly synthesized">,
@@ -1143,22 +1150,23 @@ def err_init_conversion_failed : Error<
   "%select{none|const|restrict|const and restrict|volatile|const and volatile|"
   "volatile and restrict|const, volatile, and restrict}6)}4">;
 
-def err_lvalue_to_rvalue_ref : Error<"rvalue reference to type %0 cannot bind "
-  "to lvalue of type %1">;
+def err_lvalue_to_rvalue_ref : Error<"rvalue reference %diff{to type $ cannot "
+  "bind to lvalue of type $|cannot bind to incompatible lvalue}0,1">;
 def err_lvalue_reference_bind_to_initlist : Error<
   "%select{non-const|volatile}0 lvalue reference to type %1 cannot bind to an "
   "initializer list temporary">;
 def err_lvalue_reference_bind_to_temporary : Error<
-  "%select{non-const|volatile}0 lvalue reference to type %1 cannot bind to a "
-  "temporary of type %2">;
+  "%select{non-const|volatile}0 lvalue reference %diff{to type $ cannot bind "
+  "to a temporary of type $|cannot bind to incompatible temporary}1,2">;
 def err_lvalue_reference_bind_to_unrelated : Error<
-  "%select{non-const|volatile}0 lvalue reference to type %1 cannot bind to a "
-  "value of unrelated type %2">;
+  "%select{non-const|volatile}0 lvalue reference %diff{to type $ cannot bind "
+  "to a value of unrelated type $|cannot bind to a value of unrelated type}1,2">;
 def err_reference_bind_drops_quals : Error<
-  "binding of reference to type %0 to a value of type %1 drops qualifiers">;
+  "binding of reference %diff{to type $ to a value of type $ drops "
+  "qualifiers|drops qualifiers}0,1">;
 def err_reference_bind_failed : Error<
-  "reference to type %0 could not bind to an %select{rvalue|lvalue}1 of type "
-  "%2">;
+  "reference %diff{to type $ could not bind to an %select{rvalue|lvalue}1 of "
+  "type $|could not bind to %select{rvalue|lvalue}1 of incompatible type}0,2">;
 def err_reference_bind_init_list : Error<
   "reference to type %0 cannot bind to an initializer list">;
 def warn_temporary_array_to_pointer_decay : Warning<
@@ -1767,6 +1775,9 @@ def warn_double_lock : Warning<
 def warn_no_unlock : Warning<
   "mutex '%0' is still locked at the end of function">,
   InGroup<ThreadSafetyAnalysis>, DefaultIgnore;
+def warn_expecting_locked : Warning<
+  "expecting mutex '%0' to be locked at the end of function">,
+  InGroup<ThreadSafetyAnalysis>, DefaultIgnore;  
 // FIXME: improve the error message about locks not in scope
 def warn_lock_some_predecessors : Warning<
   "mutex '%0' is not locked on every path through here">,
@@ -2162,12 +2173,13 @@ def note_ovl_candidate_bad_conv : Note<"candidate "
     "function (the implicit copy assignment operator)|"
     "function (the implicit move assignment operator)|"
     "constructor (inherited)}0%1"
-    " not viable: no known conversion from %2 to %3 for "
-    "%select{%ordinal5 argument|object argument}4; "
-    "%select{|dereference the argument with *|"
-    "take the address of the argument with &|"
-    "remove *|"
-    "remove &}6">;
+    " not viable: no known conversion "
+    "%diff{from $ to $|from argument type to parameter type}2,3 for "
+    "%select{%ordinal5 argument|object argument}4"
+    "%select{|; dereference the argument with *|"
+    "; take the address of the argument with &|"
+    "; remove *|"
+    "; remove &}6">;
 def note_ovl_candidate_bad_arc_conv : Note<"candidate "
     "%select{function|function|constructor|"
     "function |function |constructor |"
@@ -3171,7 +3183,8 @@ def err_local_cant_init : Error<
   "'__local' variable cannot have an initializer">;
 def err_block_extern_cant_init : Error<
   "'extern' variable cannot have an initializer">;
-def warn_extern_init : Warning<"'extern' variable has an initializer">;
+def warn_extern_init : Warning<"'extern' variable has an initializer">,
+  InGroup<DiagGroup<"extern-initializer">>;
 def err_variable_object_no_init : Error<
   "variable-sized object may not be initialized">;
 def err_excess_initializers : Error<
@@ -5269,6 +5282,10 @@ def warn_stringcompare : Warning<
   "result of comparison against %select{a string literal|@encode}0 is "
   "unspecified (use strncmp instead)">,
   InGroup<DiagGroup<"string-compare">>;
+
+def warn_identity_field_assign : Warning<
+  "assigning %select{field|instance variable}0 to itself">,
+  InGroup<SelfAssignmentField>;
 
 // Generic selections.
 def err_assoc_type_incomplete : Error<
