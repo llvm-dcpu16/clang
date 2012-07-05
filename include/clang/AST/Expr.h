@@ -15,6 +15,7 @@
 #define LLVM_CLANG_AST_EXPR_H
 
 #include "clang/AST/APValue.h"
+#include "clang/AST/Decl.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/Type.h"
 #include "clang/AST/DeclAccessPair.h"
@@ -634,6 +635,13 @@ public:
   /// ParenExpr or CastExprs, returning their operand.
   Expr *IgnoreParenNoopCasts(ASTContext &Ctx) LLVM_READONLY;
 
+  /// Ignore parentheses and derived-to-base casts.
+  Expr *ignoreParenBaseCasts() LLVM_READONLY;
+
+  const Expr *ignoreParenBaseCasts() const LLVM_READONLY {
+    return const_cast<Expr*>(this)->ignoreParenBaseCasts();
+  }
+
   /// \brief Determine whether this expression is a default function argument.
   ///
   /// Default arguments are implicitly generated in the abstract syntax tree
@@ -665,12 +673,14 @@ public:
 
   static bool hasAnyTypeDependentArguments(llvm::ArrayRef<Expr *> Exprs);
 
-  /// \brief If we have class type (or pointer to class type), return the
-  /// class decl. Return NULL otherwise.
+  /// \brief For an expression of class type or pointer to class type,
+  /// return the most derived class decl the expression is known to refer to.
   ///
   /// If this expression is a cast, this method looks through it to find the
-  /// most derived decl that can be infered from the expression.
-  const CXXRecordDecl *getMostDerivedClassDeclForType() const;
+  /// most derived decl that can be inferred from the expression.
+  /// This is valid because derived-to-base conversions have undefined
+  /// behavior if the object isn't dynamically of the derived type.
+  const CXXRecordDecl *getBestDynamicClassType() const;
 
   static bool classof(const Stmt *T) {
     return T->getStmtClass() >= firstExprConstant &&
@@ -1154,16 +1164,8 @@ class IntegerLiteral : public Expr, public APIntStorage {
 public:
   // type should be IntTy, LongTy, LongLongTy, UnsignedIntTy, UnsignedLongTy,
   // or UnsignedLongLongTy
-  IntegerLiteral(ASTContext &C, const llvm::APInt &V,
-                 QualType type, SourceLocation l)
-    : Expr(IntegerLiteralClass, type, VK_RValue, OK_Ordinary, false, false,
-           false, false),
-      Loc(l) {
-    assert(type->isIntegerType() && "Illegal type in IntegerLiteral");
-    assert(V.getBitWidth() == C.getIntWidth(type) &&
-           "Integer type is not the correct size for constant.");
-    setValue(C, V);
-  }
+  IntegerLiteral(ASTContext &C, const llvm::APInt &V, QualType type,
+                 SourceLocation l);
 
   /// \brief Returns a new integer literal with value 'V' and type 'type'.
   /// \param type - either IntTy, LongTy, LongLongTy, UnsignedIntTy,
@@ -1241,22 +1243,10 @@ class FloatingLiteral : public Expr, private APFloatStorage {
   SourceLocation Loc;
 
   FloatingLiteral(ASTContext &C, const llvm::APFloat &V, bool isexact,
-                  QualType Type, SourceLocation L)
-    : Expr(FloatingLiteralClass, Type, VK_RValue, OK_Ordinary, false, false,
-           false, false), Loc(L) {
-    FloatingLiteralBits.IsIEEE =
-      &C.getTargetInfo().getLongDoubleFormat() == &llvm::APFloat::IEEEquad;
-    FloatingLiteralBits.IsExact = isexact;
-    setValue(C, V);
-  }
+                  QualType Type, SourceLocation L);
 
   /// \brief Construct an empty floating-point literal.
-  explicit FloatingLiteral(ASTContext &C, EmptyShell Empty)
-    : Expr(FloatingLiteralClass, Empty) {
-    FloatingLiteralBits.IsIEEE =
-      &C.getTargetInfo().getLongDoubleFormat() == &llvm::APFloat::IEEEquad;
-    FloatingLiteralBits.IsExact = false;
-  }
+  explicit FloatingLiteral(ASTContext &C, EmptyShell Empty);
 
 public:
   static FloatingLiteral *Create(ASTContext &C, const llvm::APFloat &V,

@@ -682,9 +682,17 @@ void Sema::ActOnEndOfTranslationUnit() {
           if (isa<CXXMethodDecl>(DiagD))
             Diag(DiagD->getLocation(), diag::warn_unneeded_member_function)
                   << DiagD->getDeclName();
-          else
-            Diag(DiagD->getLocation(), diag::warn_unneeded_internal_decl)
-                  << /*function*/0 << DiagD->getDeclName();
+          else {
+            if (FD->getStorageClassAsWritten() == SC_Static &&
+                !FD->isInlineSpecified() &&
+                !SourceMgr.isFromMainFile(
+                   SourceMgr.getExpansionLoc(FD->getLocation())))
+              Diag(DiagD->getLocation(), diag::warn_unneeded_static_internal_decl)
+                << DiagD->getDeclName();
+            else
+              Diag(DiagD->getLocation(), diag::warn_unneeded_internal_decl)
+                   << /*function*/0 << DiagD->getDeclName();
+          }
         } else {
           Diag(DiagD->getLocation(),
                isa<CXXMethodDecl>(DiagD) ? diag::warn_unused_member_function
@@ -1021,10 +1029,10 @@ void Sema::ActOnComment(SourceRange Comment) {
                                  Comment.getBegin().getLocWithOffset(3));
     StringRef MagicMarkerText;
     switch (RC.getKind()) {
-    case RawComment::CK_OrdinaryBCPL:
+    case RawComment::RCK_OrdinaryBCPL:
       MagicMarkerText = "///<";
       break;
-    case RawComment::CK_OrdinaryC:
+    case RawComment::RCK_OrdinaryC:
       MagicMarkerText = "/**<";
       break;
     default:

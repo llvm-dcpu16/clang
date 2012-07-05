@@ -110,15 +110,18 @@ void CodeGenFunction::EmitIgnoredExpr(const Expr *E) {
 /// can have any type.  The result is returned as an RValue struct.
 /// If this is an aggregate expression, AggSlot indicates where the
 /// result should be returned.
-RValue CodeGenFunction::EmitAnyExpr(const Expr *E, AggValueSlot AggSlot,
-                                    bool IgnoreResult) {
+RValue CodeGenFunction::EmitAnyExpr(const Expr *E,
+                                    AggValueSlot aggSlot,
+                                    bool ignoreResult) {
   if (!hasAggregateLLVMType(E->getType()))
-    return RValue::get(EmitScalarExpr(E, IgnoreResult));
+    return RValue::get(EmitScalarExpr(E, ignoreResult));
   else if (E->getType()->isAnyComplexType())
-    return RValue::getComplex(EmitComplexExpr(E, IgnoreResult, IgnoreResult));
+    return RValue::getComplex(EmitComplexExpr(E, ignoreResult, ignoreResult));
 
-  EmitAggExpr(E, AggSlot, IgnoreResult);
-  return AggSlot.asRValue();
+  if (!ignoreResult && aggSlot.isIgnored())
+    aggSlot = CreateAggTemp(E->getType(), "agg-temp");
+  EmitAggExpr(E, aggSlot);
+  return aggSlot.asRValue();
 }
 
 /// EmitAnyExprToTemp - Similary to EmitAnyExpr(), however, the result will
@@ -1048,6 +1051,9 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV) {
   llvm::Value *Res = 0;
   for (unsigned i = 0, e = Info.getNumComponents(); i != e; ++i) {
     const CGBitFieldInfo::AccessInfo &AI = Info.getComponent(i);
+    CharUnits AccessAlignment = AI.AccessAlignment;
+    if (!LV.getAlignment().isZero())
+      AccessAlignment = std::min(AccessAlignment, LV.getAlignment());
 
     // Get the field pointer.
     llvm::Value *Ptr = LV.getBitFieldBaseAddr();
@@ -1071,8 +1077,7 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV) {
 
     // Perform the load.
     llvm::LoadInst *Load = Builder.CreateLoad(Ptr, LV.isVolatileQualified());
-    if (!AI.AccessAlignment.isZero())
-      Load->setAlignment(AI.AccessAlignment.getQuantity());
+    Load->setAlignment(AccessAlignment.getQuantity());
 
     // Shift out unused low bits and mask out unused high bits.
     llvm::Value *Val = Load;
@@ -1271,6 +1276,9 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
   // Iterate over the components, writing each piece to memory.
   for (unsigned i = 0, e = Info.getNumComponents(); i != e; ++i) {
     const CGBitFieldInfo::AccessInfo &AI = Info.getComponent(i);
+    CharUnits AccessAlignment = AI.AccessAlignment;
+    if (!Dst.getAlignment().isZero())
+      AccessAlignment = std::min(AccessAlignment, Dst.getAlignment());
 
     // Get the field pointer.
     llvm::Value *Ptr = Dst.getBitFieldBaseAddr();
@@ -1317,8 +1325,7 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
     // If necessary, load and OR in bits that are outside of the bit-field.
     if (AI.TargetBitWidth != AI.AccessWidth) {
       llvm::LoadInst *Load = Builder.CreateLoad(Ptr, Dst.isVolatileQualified());
-      if (!AI.AccessAlignment.isZero())
-        Load->setAlignment(AI.AccessAlignment.getQuantity());
+      Load->setAlignment(AccessAlignment.getQuantity());
 
       // Compute the mask for zeroing the bits that are part of the bit-field.
       llvm::APInt InvMask =
@@ -1332,8 +1339,7 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
     // Write the value.
     llvm::StoreInst *Store = Builder.CreateStore(Val, Ptr,
                                                  Dst.isVolatileQualified());
-    if (!AI.AccessAlignment.isZero())
-      Store->setAlignment(AI.AccessAlignment.getQuantity());
+    Store->setAlignment(AccessAlignment.getQuantity());
   }
 }
 
@@ -1727,47 +1733,13 @@ GetAddrOfConstantWideString(StringRef Str,
   return GV;
 }
 
-// FIXME: Mostly copied from StringLiteralParser::CopyStringFragment
 static void ConvertUTF8ToWideString(unsigned CharByteWidth, StringRef Source,
                                     SmallString<32>& Target) {
   Target.resize(CharByteWidth * (Source.size() + 1));
   char* ResultPtr = &Target[0];
-
-  assert(CharByteWidth==1 || CharByteWidth==2 || CharByteWidth==4);
-  ConversionResult result = conversionOK;
-  // Copy the character span over.
-  if (CharByteWidth == 1) {
-    if (!isLegalUTF8String(reinterpret_cast<const UTF8*>(&*Source.begin()),
-                           reinterpret_cast<const UTF8*>(&*Source.end())))
-      result = sourceIllegal;
-    memcpy(ResultPtr, Source.data(), Source.size());
-    ResultPtr += Source.size();
-  } else if (CharByteWidth == 2) {
-    UTF8 const *sourceStart = (UTF8 const *)Source.data();
-    // FIXME: Make the type of the result buffer correct instead of
-    // using reinterpret_cast.
-    UTF16 *targetStart = reinterpret_cast<UTF16*>(ResultPtr);
-    ConversionFlags flags = strictConversion;
-    result = ConvertUTF8toUTF16(
-      &sourceStart,sourceStart + Source.size(),
-        &targetStart,targetStart + 2*Source.size(),flags);
-    if (result==conversionOK)
-      ResultPtr = reinterpret_cast<char*>(targetStart);
-  } else if (CharByteWidth == 4) {
-    UTF8 const *sourceStart = (UTF8 const *)Source.data();
-    // FIXME: Make the type of the result buffer correct instead of
-    // using reinterpret_cast.
-    UTF32 *targetStart = reinterpret_cast<UTF32*>(ResultPtr);
-    ConversionFlags flags = strictConversion;
-    result = ConvertUTF8toUTF32(
-        &sourceStart,sourceStart + Source.size(),
-        &targetStart,targetStart + 4*Source.size(),flags);
-    if (result==conversionOK)
-      ResultPtr = reinterpret_cast<char*>(targetStart);
-  }
-  assert((result != targetExhausted)
-         && "ConvertUTF8toUTFXX exhausted target buffer");
-  assert(result == conversionOK);
+  bool success = ConvertUTF8toWide(CharByteWidth, Source, ResultPtr);
+  (void)success;
+  assert(success);
   Target.resize(ResultPtr - &Target[0]);
 }
 
@@ -2085,16 +2057,6 @@ LValue CodeGenFunction::EmitMemberExpr(const MemberExpr *E) {
   llvm_unreachable("Unhandled member declaration!");
 }
 
-LValue CodeGenFunction::EmitLValueForBitfield(llvm::Value *BaseValue,
-                                              const FieldDecl *Field,
-                                              unsigned CVRQualifiers) {
-  const CGRecordLayout &RL =
-    CGM.getTypes().getCGRecordLayout(Field->getParent());
-  const CGBitFieldInfo &Info = RL.getBitFieldInfo(Field);
-  return LValue::MakeBitfield(BaseValue, Info,
-                          Field->getType().withCVRQualifiers(CVRQualifiers));
-}
-
 /// EmitLValueForAnonRecordField - Given that the field is a member of
 /// an anonymous struct or union buried inside a record, and given
 /// that the base value is a pointer to the enclosing record, derive
@@ -2119,9 +2081,15 @@ LValue CodeGenFunction::EmitLValueForAnonRecordField(llvm::Value *BaseValue,
 
 LValue CodeGenFunction::EmitLValueForField(LValue base,
                                            const FieldDecl *field) {
-  if (field->isBitField())
-    return EmitLValueForBitfield(base.getAddress(), field,
-                                 base.getVRQualifiers());
+  if (field->isBitField()) {
+    const CGRecordLayout &RL =
+      CGM.getTypes().getCGRecordLayout(field->getParent());
+    const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
+    QualType fieldType =
+      field->getType().withCVRQualifiers(base.getVRQualifiers());
+    return LValue::MakeBitfield(base.getAddress(), Info, fieldType,
+                                base.getAlignment());
+  }
 
   const RecordDecl *rec = field->getParent();
   QualType type = field->getType();

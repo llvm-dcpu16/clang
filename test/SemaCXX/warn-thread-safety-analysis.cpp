@@ -49,6 +49,30 @@ class __attribute__((scoped_lockable)) ReaderMutexLock {
   ~ReaderMutexLock() __attribute__((unlock_function));
 };
 
+class SCOPED_LOCKABLE ReleasableMutexLock {
+ public:
+  ReleasableMutexLock(Mutex *mu) EXCLUSIVE_LOCK_FUNCTION(mu);
+  ~ReleasableMutexLock() UNLOCK_FUNCTION();
+
+  void Release() UNLOCK_FUNCTION();
+};
+
+
+template<class T>
+class SmartPtr {
+public:
+  SmartPtr(T* p) : ptr_(p) { }
+  SmartPtr(const SmartPtr<T>& p) : ptr_(p.ptr_) { }
+  ~SmartPtr();
+
+  T* get()        const { return ptr_; }
+  T* operator->() const { return ptr_; }
+  T& operator*()  const { return *ptr_; }
+
+private:
+  T* ptr_;
+};
+
 
 Mutex sls_mu;
 
@@ -1578,7 +1602,7 @@ struct TestScopedLockable {
     MutexLock mulock_a(&mu1);
     MutexLock mulock_b(&mu1); // \
       // expected-warning {{locking 'mu1' that is already locked}}
-  }   // expected-warning {{unlocking 'mu1' that was not locked}}
+  }
 
   void foo4() {
     MutexLock mulock1(&mu1), mulock2(&mu2);
@@ -2359,5 +2383,360 @@ void test3(Bar* b1, Bar* b2) {
 }
 
 } // end namespace LockReturned
+
+
+namespace ReleasableScopedLock {
+
+class Foo {
+  Mutex mu_;
+  bool c;
+  int a GUARDED_BY(mu_);
+
+  void test1();
+  void test2();
+  void test3();
+};
+
+
+void Foo::test1() {
+  ReleasableMutexLock rlock(&mu_);
+  rlock.Release();
+}
+
+void Foo::test2() {
+  ReleasableMutexLock rlock(&mu_);
+  if (c) {            // test join point -- held/not held during release
+    rlock.Release();
+  }
+}
+
+void Foo::test3() {
+  ReleasableMutexLock rlock(&mu_);
+  a = 0;
+  rlock.Release();
+  a = 1;  // expected-warning {{writing variable 'a' requires locking 'mu_' exclusively}}
+}
+
+} // end namespace ReleasableScopedLock
+
+
+namespace TrylockFunctionTest {
+
+class Foo {
+public:
+  Mutex mu1_;
+  Mutex mu2_;
+  bool c;
+
+  bool lockBoth() EXCLUSIVE_TRYLOCK_FUNCTION(true, mu1_, mu2_);
+};
+
+bool Foo::lockBoth() {
+  if (!mu1_.TryLock())
+    return false;
+
+  mu2_.Lock();
+  if (!c) {
+    mu1_.Unlock();
+    mu2_.Unlock();
+    return false;
+  }
+
+  return true;
+}
+
+
+}  // end namespace TrylockFunctionTest
+
+
+
+namespace DoubleLockBug {
+
+class Foo {
+public:
+  Mutex mu_;
+  int a GUARDED_BY(mu_);
+
+  void foo() EXCLUSIVE_LOCKS_REQUIRED(mu_);
+};
+
+
+void Foo::foo() EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+  a = 0;
+}
+
+};
+
+
+namespace UnlockBug {
+
+class Foo {
+public:
+  Mutex mutex_;
+
+  void foo1() EXCLUSIVE_LOCKS_REQUIRED(mutex_) {  // expected-note {{mutex acquired here}}
+    mutex_.Unlock();
+  }  // expected-warning {{expecting mutex 'mutex_' to be locked at the end of function}}
+
+
+  void foo2() SHARED_LOCKS_REQUIRED(mutex_) {   // expected-note {{mutex acquired here}}
+    mutex_.Unlock();
+  }  // expected-warning {{expecting mutex 'mutex_' to be locked at the end of function}}
+};
+
+} // end namespace UnlockBug
+
+
+namespace FoolishScopedLockableBug {
+
+class SCOPED_LOCKABLE WTF_ScopedLockable {
+public:
+  WTF_ScopedLockable(Mutex* mu) EXCLUSIVE_LOCK_FUNCTION(mu);
+
+  // have to call release() manually;
+  ~WTF_ScopedLockable();
+
+  void release() UNLOCK_FUNCTION();
+};
+
+
+class Foo {
+  Mutex mu_;
+  int a GUARDED_BY(mu_);
+  bool c;
+
+  void doSomething();
+
+  void test1() {
+    WTF_ScopedLockable wtf(&mu_);
+    wtf.release();
+  }
+
+  void test2() {
+    WTF_ScopedLockable wtf(&mu_);  // expected-note {{mutex acquired here}}
+  }  // expected-warning {{mutex 'mu_' is still locked at the end of function}}
+
+  void test3() {
+    if (c) {
+      WTF_ScopedLockable wtf(&mu_);
+      wtf.release();
+    }
+  }
+
+  void test4() {
+    if (c) {
+      doSomething();
+    }
+    else {
+      WTF_ScopedLockable wtf(&mu_);
+      wtf.release();
+    }
+  }
+
+  void test5() {
+    if (c) {
+      WTF_ScopedLockable wtf(&mu_);  // expected-note {{mutex acquired here}}
+    }
+  } // expected-warning {{mutex 'mu_' is not locked on every path through here}}
+
+  void test6() {
+    if (c) {
+      doSomething();
+    }
+    else {
+      WTF_ScopedLockable wtf(&mu_);  // expected-note {{mutex acquired here}}
+    }
+  } // expected-warning {{mutex 'mu_' is not locked on every path through here}}
+};
+
+
+} // end namespace FoolishScopedLockableBug
+
+
+namespace TemporaryCleanupExpr {
+
+class Foo {
+  int a GUARDED_BY(getMutexPtr().get());
+
+  SmartPtr<Mutex> getMutexPtr();
+
+  void test();
+};
+
+
+void Foo::test() {
+  {
+    ReaderMutexLock lock(getMutexPtr().get());
+    int b = a;
+  }
+  int b = a;  // expected-warning {{reading variable 'a' requires locking 'getMutexPtr'}}
+}
+
+} // end namespace TemporaryCleanupExpr
+
+
+
+namespace SmartPointerTests {
+
+class Foo {
+public:
+  SmartPtr<Mutex> mu_;
+  int a GUARDED_BY(mu_);
+  int b GUARDED_BY(mu_.get());
+  int c GUARDED_BY(*mu_);
+
+  void Lock()   EXCLUSIVE_LOCK_FUNCTION(mu_);
+  void Unlock() UNLOCK_FUNCTION(mu_);
+
+  void test0();
+  void test1();
+  void test2();
+  void test3();
+  void test4();
+  void test5();
+  void test6();
+  void test7();
+  void test8();
+};
+
+void Foo::test0() {
+  a = 0;  // expected-warning {{writing variable 'a' requires locking 'mu_' exclusively}}
+  b = 0;  // expected-warning {{writing variable 'b' requires locking 'mu_' exclusively}}
+  c = 0;  // expected-warning {{writing variable 'c' requires locking 'mu_' exclusively}}
+}
+
+void Foo::test1() {
+  mu_->Lock();
+  a = 0;
+  b = 0;
+  c = 0;
+  mu_->Unlock();
+}
+
+void Foo::test2() {
+  (*mu_).Lock();
+  a = 0;
+  b = 0;
+  c = 0;
+  (*mu_).Unlock();
+}
+
+
+void Foo::test3() {
+  mu_.get()->Lock();
+  a = 0;
+  b = 0;
+  c = 0;
+  mu_.get()->Unlock();
+}
+
+
+void Foo::test4() {
+  MutexLock lock(mu_.get());
+  a = 0;
+  b = 0;
+  c = 0;
+}
+
+
+void Foo::test5() {
+  MutexLock lock(&(*mu_));
+  a = 0;
+  b = 0;
+  c = 0;
+}
+
+
+void Foo::test6() {
+  Lock();
+  a = 0;
+  b = 0;
+  c = 0;
+  Unlock();
+}
+
+
+void Foo::test7() {
+  {
+    Lock();
+    mu_->Unlock();
+  }
+  {
+    mu_->Lock();
+    Unlock();
+  }
+  {
+    mu_.get()->Lock();
+    mu_->Unlock();
+  }
+  {
+    mu_->Lock();
+    mu_.get()->Unlock();
+  }
+  {
+    mu_.get()->Lock();
+    (*mu_).Unlock();
+  }
+  {
+    (*mu_).Lock();
+    mu_->Unlock();
+  }
+}
+
+
+void Foo::test8() {
+  mu_->Lock();
+  mu_.get()->Lock();    // expected-warning {{locking 'mu_' that is already locked}}
+  (*mu_).Lock();        // expected-warning {{locking 'mu_' that is already locked}}
+  mu_.get()->Unlock();
+  Unlock();             // expected-warning {{unlocking 'mu_' that was not locked}}
+}
+
+
+class Bar {
+  SmartPtr<Foo> foo;
+
+  void test0();
+  void test1();
+  void test2();
+  void test3();
+};
+
+
+void Bar::test0() {
+  foo->a = 0;         // expected-warning {{writing variable 'a' requires locking 'mu_' exclusively}}
+  (*foo).b = 0;       // expected-warning {{writing variable 'b' requires locking 'mu_' exclusively}}
+  foo.get()->c = 0;   // expected-warning {{writing variable 'c' requires locking 'mu_' exclusively}}
+}
+
+
+void Bar::test1() {
+  foo->mu_->Lock();
+  foo->a = 0;
+  (*foo).b = 0;
+  foo.get()->c = 0;
+  foo->mu_->Unlock();
+}
+
+
+void Bar::test2() {
+  (*foo).mu_->Lock();
+  foo->a = 0;
+  (*foo).b = 0;
+  foo.get()->c = 0;
+  foo.get()->mu_->Unlock();
+}
+
+
+void Bar::test3() {
+  MutexLock lock(foo->mu_.get());
+  foo->a = 0;
+  (*foo).b = 0;
+  foo.get()->c = 0;
+}
+
+}  // end namespace SmartPointerTests
+
+
 
 

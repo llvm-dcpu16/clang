@@ -26,6 +26,7 @@
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/SourceLocation.h"
+#include "clang/Basic/OperatorKinds.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/ImmutableMap.h"
@@ -162,6 +163,13 @@ class MutexID {
         buildMutexID(At->getArg(), &LRCallCtx);
         return;
       }
+      // Hack to treat smart pointers and iterators as pointers;
+      // ignore any method named get().
+      if (CMCE->getMethodDecl()->getNameAsString() == "get" &&
+          CMCE->getNumArgs() == 0) {
+        buildMutexID(CMCE->getImplicitObjectArgument(), CallCtx);
+        return;
+      }
       DeclSeq.push_back(CMCE->getMethodDecl()->getCanonicalDecl());
       buildMutexID(CMCE->getImplicitObjectArgument(), CallCtx);
       unsigned NumCallArgs = CMCE->getNumArgs();
@@ -178,6 +186,15 @@ class MutexID {
         LRCallCtx.PrevCtx = CallCtx;
         buildMutexID(At->getArg(), &LRCallCtx);
         return;
+      }
+      // Treat smart pointers and iterators as pointers;
+      // ignore the * and -> operators.
+      if (CXXOperatorCallExpr *OE = dyn_cast<CXXOperatorCallExpr>(CE)) {
+        OverloadedOperatorKind k = OE->getOperator();
+        if (k == OO_Arrow || k == OO_Star) {
+          buildMutexID(OE->getArg(0), CallCtx);
+          return;
+        }
       }
       buildMutexID(CE->getCallee(), CallCtx);
       unsigned NumCallArgs = CE->getNumArgs();
@@ -206,15 +223,19 @@ class MutexID {
       buildMutexID(CE->getSubExpr(), CallCtx);
     } else if (ParenExpr *PE = dyn_cast<ParenExpr>(Exp)) {
       buildMutexID(PE->getSubExpr(), CallCtx);
+    } else if (ExprWithCleanups *EWC = dyn_cast<ExprWithCleanups>(Exp)) {
+      buildMutexID(EWC->getSubExpr(), CallCtx);
+    } else if (CXXBindTemporaryExpr *E = dyn_cast<CXXBindTemporaryExpr>(Exp)) {
+      buildMutexID(E->getSubExpr(), CallCtx);
     } else if (isa<CharacterLiteral>(Exp) ||
-             isa<CXXNullPtrLiteralExpr>(Exp) ||
-             isa<GNUNullExpr>(Exp) ||
-             isa<CXXBoolLiteralExpr>(Exp) ||
-             isa<FloatingLiteral>(Exp) ||
-             isa<ImaginaryLiteral>(Exp) ||
-             isa<IntegerLiteral>(Exp) ||
-             isa<StringLiteral>(Exp) ||
-             isa<ObjCStringLiteral>(Exp)) {
+               isa<CXXNullPtrLiteralExpr>(Exp) ||
+               isa<GNUNullExpr>(Exp) ||
+               isa<CXXBoolLiteralExpr>(Exp) ||
+               isa<FloatingLiteral>(Exp) ||
+               isa<ImaginaryLiteral>(Exp) ||
+               isa<IntegerLiteral>(Exp) ||
+               isa<StringLiteral>(Exp) ||
+               isa<ObjCStringLiteral>(Exp)) {
       return;  // FIXME: Ignore literals for now
     } else {
       // Ignore.  FIXME: mark as invalid expression?
@@ -349,14 +370,18 @@ struct LockData {
   ///
   /// FIXME: add support for re-entrant locking and lock up/downgrading
   LockKind LKind;
-  MutexID UnderlyingMutex;  // for ScopedLockable objects
+  bool     Managed;            // for ScopedLockable objects
+  MutexID  UnderlyingMutex;    // for ScopedLockable objects
 
-  LockData(SourceLocation AcquireLoc, LockKind LKind)
-    : AcquireLoc(AcquireLoc), LKind(LKind), UnderlyingMutex(Decl::EmptyShell())
+  LockData(SourceLocation AcquireLoc, LockKind LKind, bool M = false)
+    : AcquireLoc(AcquireLoc), LKind(LKind), Managed(M),
+      UnderlyingMutex(Decl::EmptyShell())
   {}
 
   LockData(SourceLocation AcquireLoc, LockKind LKind, const MutexID &Mu)
-    : AcquireLoc(AcquireLoc), LKind(LKind), UnderlyingMutex(Mu) {}
+    : AcquireLoc(AcquireLoc), LKind(LKind), Managed(false),
+      UnderlyingMutex(Mu)
+  {}
 
   bool operator==(const LockData &other) const {
     return AcquireLoc == other.AcquireLoc && LKind == other.LKind;
@@ -920,11 +945,12 @@ public:
   ThreadSafetyAnalyzer(ThreadSafetyHandler &H) : Handler(H) {}
 
   Lockset addLock(const Lockset &LSet, const MutexID &Mutex,
-                  const LockData &LDat);
+                  const LockData &LDat, bool Warn=true);
   Lockset addLock(const Lockset &LSet, Expr *MutexExp, const NamedDecl *D,
-                  const LockData &LDat);
+                  const LockData &LDat, bool Warn=true);
   Lockset removeLock(const Lockset &LSet, const MutexID &Mutex,
-                     SourceLocation UnlockLoc);
+                     SourceLocation UnlockLoc,
+                     bool Warn=true, bool FullyRemove=false);
 
   template <class AttrType>
   Lockset addLocksToSet(const Lockset &LSet, LockKind LK, AttrType *Attr,
@@ -946,7 +972,13 @@ public:
                          const CFGBlock *CurrBlock);
 
   Lockset intersectAndWarn(const Lockset &LSet1, const Lockset &LSet2,
-                           SourceLocation JoinLoc, LockErrorKind LEK);
+                           SourceLocation JoinLoc,
+                           LockErrorKind LEK1, LockErrorKind LEK2);
+
+  Lockset intersectAndWarn(const Lockset &LSet1, const Lockset &LSet2,
+                           SourceLocation JoinLoc, LockErrorKind LEK1) {
+    return intersectAndWarn(LSet1, LSet2, JoinLoc, LEK1, LEK1);
+  }
 
   void runAnalysis(AnalysisDeclContext &AC);
 };
@@ -957,11 +989,13 @@ public:
 /// \param LDat  -- the LockData for the lock
 Lockset ThreadSafetyAnalyzer::addLock(const Lockset &LSet,
                                       const MutexID &Mutex,
-                                      const LockData &LDat) {
+                                      const LockData &LDat,
+                                      bool Warn) {
   // FIXME: deal with acquired before/after annotations.
   // FIXME: Don't always warn when we have support for reentrant locks.
   if (LSet.lookup(Mutex)) {
-    Handler.handleDoubleLock(Mutex.getName(), LDat.AcquireLoc);
+    if (Warn)
+      Handler.handleDoubleLock(Mutex.getName(), LDat.AcquireLoc);
     return LSet;
   } else {
     return LocksetFactory.add(LSet, Mutex, LDat);
@@ -971,13 +1005,14 @@ Lockset ThreadSafetyAnalyzer::addLock(const Lockset &LSet,
 /// \brief Construct a new mutex and add it to the lockset.
 Lockset ThreadSafetyAnalyzer::addLock(const Lockset &LSet,
                                       Expr *MutexExp, const NamedDecl *D,
-                                      const LockData &LDat) {
+                                      const LockData &LDat,
+                                      bool Warn) {
   MutexID Mutex(MutexExp, 0, D);
   if (!Mutex.isValid()) {
     MutexID::warnInvalidLock(Handler, MutexExp, 0, D);
     return LSet;
   }
-  return addLock(LSet, Mutex, LDat);
+  return addLock(LSet, Mutex, LDat, Warn);
 }
 
 
@@ -986,20 +1021,30 @@ Lockset ThreadSafetyAnalyzer::addLock(const Lockset &LSet,
 /// \param UnlockLoc The source location of the unlock (only used in error msg)
 Lockset ThreadSafetyAnalyzer::removeLock(const Lockset &LSet,
                                          const MutexID &Mutex,
-                                         SourceLocation UnlockLoc) {
+                                         SourceLocation UnlockLoc,
+                                         bool Warn, bool FullyRemove) {
   const LockData *LDat = LSet.lookup(Mutex);
   if (!LDat) {
-    Handler.handleUnmatchedUnlock(Mutex.getName(), UnlockLoc);
+    if (Warn)
+      Handler.handleUnmatchedUnlock(Mutex.getName(), UnlockLoc);
     return LSet;
   }
   else {
     Lockset Result = LSet;
-    // For scoped-lockable vars, remove the mutex associated with this var.
-    if (LDat->UnderlyingMutex.isValid())
-      Result = removeLock(Result, LDat->UnderlyingMutex, UnlockLoc);
+    if (LDat->UnderlyingMutex.isValid()) {
+      // For scoped-lockable vars, remove the mutex associated with this var.
+      Result = removeLock(Result, LDat->UnderlyingMutex, UnlockLoc,
+                          false, true);
+      // Fully remove the object only when the destructor is called
+      if (FullyRemove)
+        return LocksetFactory.remove(Result, Mutex);
+      else
+        return Result;
+    }
     return LocksetFactory.remove(Result, Mutex);
   }
 }
+
 
 /// \brief This function, parameterized by an attribute type, is used to add a
 /// set of locks specified as attribute arguments to the lockset.
@@ -1040,13 +1085,17 @@ Lockset ThreadSafetyAnalyzer::addLocksToSet(const Lockset &LSet,
     if (!Mutex.isValid())
       MutexID::warnInvalidLock(Handler, *I, Exp, FunDecl);
     else {
-      Result = addLock(Result, Mutex, LockData(ExpLocation, LK));
       if (isScopedVar) {
+        // Mutex is managed by scoped var -- suppress certain warnings.
+        Result = addLock(Result, Mutex, LockData(ExpLocation, LK, true));
         // For scoped lockable vars, map this var to its underlying mutex.
         DeclRefExpr DRE(VD, false, VD->getType(), VK_LValue, VD->getLocation());
         MutexID SMutex(&DRE, 0, 0);
         Result = addLock(Result, SMutex,
                          LockData(VD->getLocation(), LK, Mutex));
+      }
+      else {
+        Result = addLock(Result, Mutex, LockData(ExpLocation, LK));
       }
     }
   }
@@ -1057,9 +1106,11 @@ Lockset ThreadSafetyAnalyzer::addLocksToSet(const Lockset &LSet,
 /// arguments from the lockset.
 Lockset ThreadSafetyAnalyzer::removeLocksFromSet(const Lockset &LSet,
                                                  UnlockFunctionAttr *Attr,
-                                                 Expr *Exp, NamedDecl* FunDecl) {
+                                                 Expr *Exp,
+                                                 NamedDecl* FunDecl) {
   SourceLocation ExpLocation;
   if (Exp) ExpLocation = Exp->getExprLoc();
+  bool Dtor = isa<CXXDestructorDecl>(FunDecl);
 
   if (Attr->args_size() == 0) {
     // The mutex held is the "this" object.
@@ -1068,7 +1119,7 @@ Lockset ThreadSafetyAnalyzer::removeLocksFromSet(const Lockset &LSet,
       MutexID::warnInvalidLock(Handler, 0, Exp, FunDecl);
       return LSet;
     } else {
-      return removeLock(LSet, Mu, ExpLocation);
+      return removeLock(LSet, Mu, ExpLocation, true, Dtor);
     }
   }
 
@@ -1079,7 +1130,7 @@ Lockset ThreadSafetyAnalyzer::removeLocksFromSet(const Lockset &LSet,
     if (!Mutex.isValid())
       MutexID::warnInvalidLock(Handler, *I, Exp, FunDecl);
     else
-      Result = removeLock(Result, Mutex, ExpLocation);
+      Result = removeLock(Result, Mutex, ExpLocation, true, Dtor);
   }
   return Result;
 }
@@ -1493,6 +1544,10 @@ void BuildLockset::VisitDeclStmt(DeclStmt *S) {
     Decl *D = *I;
     if (VarDecl *VD = dyn_cast_or_null<VarDecl>(D)) {
       Expr *E = VD->getInit();
+      // handle constructors that involve temporaries
+      if (ExprWithCleanups *EWC = dyn_cast_or_null<ExprWithCleanups>(E))
+        E = EWC->getSubExpr();
+
       if (CXXConstructExpr *CE = dyn_cast_or_null<CXXConstructExpr>(E)) {
         NamedDecl *CtorD = dyn_cast_or_null<NamedDecl>(CE->getConstructor());
         if (!CtorD || !CtorD->hasAttrs())
@@ -1517,39 +1572,63 @@ void BuildLockset::VisitDeclStmt(DeclStmt *S) {
 /// \param LSet1 The first lockset.
 /// \param LSet2 The second lockset.
 /// \param JoinLoc The location of the join point for error reporting
-/// \param LEK The error message to report.
+/// \param LEK1 The error message to report if a mutex is missing from LSet1
+/// \param LEK2 The error message to report if a mutex is missing from Lset2
 Lockset ThreadSafetyAnalyzer::intersectAndWarn(const Lockset &LSet1,
                                                const Lockset &LSet2,
                                                SourceLocation JoinLoc,
-                                               LockErrorKind LEK) {
+                                               LockErrorKind LEK1,
+                                               LockErrorKind LEK2) {
   Lockset Intersection = LSet1;
 
   for (Lockset::iterator I = LSet2.begin(), E = LSet2.end(); I != E; ++I) {
     const MutexID &LSet2Mutex = I.getKey();
-    const LockData &LSet2LockData = I.getData();
-    if (const LockData *LD = LSet1.lookup(LSet2Mutex)) {
-      if (LD->LKind != LSet2LockData.LKind) {
+    const LockData &LDat2 = I.getData();
+    if (const LockData *LDat1 = LSet1.lookup(LSet2Mutex)) {
+      if (LDat1->LKind != LDat2.LKind) {
         Handler.handleExclusiveAndShared(LSet2Mutex.getName(),
-                                         LSet2LockData.AcquireLoc,
-                                         LD->AcquireLoc);
-        if (LD->LKind != LK_Exclusive)
-          Intersection = LocksetFactory.add(Intersection, LSet2Mutex,
-                                            LSet2LockData);
+                                         LDat2.AcquireLoc,
+                                         LDat1->AcquireLoc);
+        if (LDat1->LKind != LK_Exclusive)
+          Intersection = LocksetFactory.add(Intersection, LSet2Mutex, LDat2);
       }
     } else {
-      Handler.handleMutexHeldEndOfScope(LSet2Mutex.getName(),
-                                        LSet2LockData.AcquireLoc,
-                                        JoinLoc, LEK);
+      if (LDat2.UnderlyingMutex.isValid()) {
+        if (LSet2.lookup(LDat2.UnderlyingMutex)) {
+          // If this is a scoped lock that manages another mutex, and if the
+          // underlying mutex is still held, then warn about the underlying
+          // mutex.
+          Handler.handleMutexHeldEndOfScope(LDat2.UnderlyingMutex.getName(),
+                                            LDat2.AcquireLoc,
+                                            JoinLoc, LEK1);
+        }
+      }
+      else if (!LDat2.Managed)
+        Handler.handleMutexHeldEndOfScope(LSet2Mutex.getName(),
+                                          LDat2.AcquireLoc,
+                                          JoinLoc, LEK1);
     }
   }
 
   for (Lockset::iterator I = LSet1.begin(), E = LSet1.end(); I != E; ++I) {
     if (!LSet2.contains(I.getKey())) {
       const MutexID &Mutex = I.getKey();
-      const LockData &MissingLock = I.getData();
-      Handler.handleMutexHeldEndOfScope(Mutex.getName(),
-                                        MissingLock.AcquireLoc,
-                                        JoinLoc, LEK);
+      const LockData &LDat1 = I.getData();
+
+      if (LDat1.UnderlyingMutex.isValid()) {
+        if (LSet1.lookup(LDat1.UnderlyingMutex)) {
+          // If this is a scoped lock that manages another mutex, and if the
+          // underlying mutex is still held, then warn about the underlying
+          // mutex.
+          Handler.handleMutexHeldEndOfScope(LDat1.UnderlyingMutex.getName(),
+                                            LDat1.AcquireLoc,
+                                            JoinLoc, LEK1);
+        }
+      }
+      else if (!LDat1.Managed)
+        Handler.handleMutexHeldEndOfScope(Mutex.getName(),
+                                          LDat1.AcquireLoc,
+                                          JoinLoc, LEK2);
       Intersection = LocksetFactory.remove(Intersection, Mutex);
     }
   }
@@ -1613,14 +1692,14 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
              SLRIter = SLRAttr->args_begin(),
              SLREnd = SLRAttr->args_end(); SLRIter != SLREnd; ++SLRIter)
           InitialLockset = addLock(InitialLockset, *SLRIter, D,
-                                   LockData(AttrLoc, LK_Shared));
+                                   LockData(AttrLoc, LK_Shared), false);
       } else if (ExclusiveLocksRequiredAttr *ELRAttr
                    = dyn_cast<ExclusiveLocksRequiredAttr>(Attr)) {
         for (ExclusiveLocksRequiredAttr::args_iterator
              ELRIter = ELRAttr->args_begin(),
              ELREnd = ELRAttr->args_end(); ELRIter != ELREnd; ++ELRIter)
           InitialLockset = addLock(InitialLockset, *ELRIter, D,
-                                   LockData(AttrLoc, LK_Exclusive));
+                                   LockData(AttrLoc, LK_Exclusive), false);
       } else if (isa<UnlockFunctionAttr>(Attr)) {
         // Don't try to check unlock functions for now
         return;
@@ -1629,6 +1708,12 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
         return;
       } else if (isa<SharedLockFunctionAttr>(Attr)) {
         // Don't try to check lock functions for now
+        return;
+      } else if (isa<ExclusiveTrylockFunctionAttr>(Attr)) {
+        // Don't try to check trylock functions for now
+        return;
+      } else if (isa<SharedTrylockFunctionAttr>(Attr)) {
+        // Don't try to check trylock functions for now
         return;
       }
     }
@@ -1785,7 +1870,8 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
   // FIXME: Should we call this function for all blocks which exit the function?
   intersectAndWarn(Initial->EntrySet, Final->ExitSet,
                    Final->ExitLoc,
-                   LEK_LockedAtEndOfFunction);
+                   LEK_LockedAtEndOfFunction,
+                   LEK_NotLockedAtEndOfFunction);
 }
 
 } // end anonymous namespace

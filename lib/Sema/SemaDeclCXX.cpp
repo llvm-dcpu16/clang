@@ -1119,6 +1119,8 @@ Sema::ActOnBaseSpecifier(Decl *classdecl, SourceRange SpecifierRange,
                                                       Virtual, Access, TInfo,
                                                       EllipsisLoc))
     return BaseSpec;
+  else
+    Class->setInvalidDecl();
 
   return true;
 }
@@ -6799,7 +6801,7 @@ void Sema::DefineImplicitDefaultConstructor(SourceLocation CurrentLocation,
   }
 
   SourceLocation Loc = Constructor->getLocation();
-  Constructor->setBody(new (Context) CompoundStmt(Context, 0, 0, Loc, Loc));
+  Constructor->setBody(new (Context) CompoundStmt(Loc));
 
   Constructor->setUsed();
   MarkVTableUsed(CurrentLocation, ClassDecl);
@@ -7160,7 +7162,7 @@ void Sema::DefineImplicitDestructor(SourceLocation CurrentLocation,
   }
 
   SourceLocation Loc = Destructor->getLocation();
-  Destructor->setBody(new (Context) CompoundStmt(Context, 0, 0, Loc, Loc));
+  Destructor->setBody(new (Context) CompoundStmt(Loc));
   Destructor->setImplicitlyDefined(true);
   Destructor->setUsed();
   MarkVTableUsed(CurrentLocation, ClassDecl);
@@ -8903,8 +8905,7 @@ void Sema::DefineImplicitLambdaToFunctionPointerConversion(
   // will fill in the actual details.
   Invoke->setUsed();
   Invoke->setReferenced();
-  Invoke->setBody(new (Context) CompoundStmt(Context, 0, 0, Conv->getLocation(),
-                                             Conv->getLocation()));
+  Invoke->setBody(new (Context) CompoundStmt(Conv->getLocation()));
   
   if (ASTMutationListener *L = getASTMutationListener()) {
     L->CompletedImplicitDefinition(Conv);
@@ -10318,8 +10319,8 @@ void Sema::SetDeclDeleted(Decl *Dcl, SourceLocation DelLoc) {
   if (const FunctionDecl *Prev = Fn->getPreviousDecl()) {
     // Don't consider the implicit declaration we generate for explicit
     // specializations. FIXME: Do not generate these implicit declarations.
-    if (Prev->getTemplateSpecializationKind() != TSK_ExplicitSpecialization
-        || Prev->getPreviousDecl()) {
+    if ((Prev->getTemplateSpecializationKind() != TSK_ExplicitSpecialization
+        || Prev->getPreviousDecl()) && !Prev->isDefined()) {
       Diag(DelLoc, diag::err_deleted_decl_not_first);
       Diag(Prev->getLocation(), diag::note_previous_declaration);
     }
